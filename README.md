@@ -1,30 +1,41 @@
 # pii-proxy
 
-A local reverse proxy that sits between Claude Code and `api.anthropic.com`. It intercepts every outgoing request, replaces personal information and credentials with realistic Faker-generated pseudonyms, then restores the real values in Claude's responses before they reach the screen. Anthropic never sees your real PII.
+A local reverse proxy that sits between your AI clients and their upstream APIs. It intercepts every outgoing request, replaces personal information and credentials with realistic Faker-generated pseudonyms, then restores the real values in responses before they reach the screen. The AI provider never sees your real PII.
+
+Supports **Anthropic** (`/v1/messages`) and **OpenAI** (`/v1/chat/completions`) — both providers get identical PII protection through the same proxy instance.
 
 ---
 
 ## How it works
 
 ```
-Claude Code
-    │  ANTHROPIC_BASE_URL=http://127.0.0.1:8082
-    ▼
-pii_proxy.py  (aiohttp, port 8082)
-    │
-    ├─ anonymize request body  ──────────────────────────────────────────
-    │      [system prompt]      regex + known_pii                no NER
-    │      [latest user msg]    regex + known_pii + NER          full pipeline
-    │      [history user msgs]  regex + known_pii + map replay   no NER (fast)
-    │      [assistant turns]    regex + known_pii                no NER
-    │      [tool_result]        regex + known_pii + map replay   no NER
-    │
-    ├─ forward to api.anthropic.com  (pseudonymized request)
-    │
-    ├─ receive response
-    │
-    └─ deanonymize response  →  Claude Code sees real values
+Claude Code          OpenAI SDK client
+    │  ANTHROPIC_BASE_URL=      │  OPENAI_BASE_URL=
+    │  http://127.0.0.1:8082    │  http://127.0.0.1:8082
+    └──────────────┬────────────┘
+                   ▼
+        pii_proxy.py  (aiohttp, port 8082)
+                   │
+                   ├─ route by path ─────────────────────────────────────
+                   │      /v1/messages          →  AnthropicProvider
+                   │      /v1/chat/completions  →  OpenAIProvider
+                   │      everything else       →  pass through untouched
+                   │
+                   ├─ anonymize request body  ───────────────────────────
+                   │      [system prompt]      regex + known_pii                no NER
+                   │      [latest user msg]    regex + known_pii + NER          full pipeline
+                   │      [history user msgs]  regex + known_pii + map replay   no NER (fast)
+                   │      [assistant turns]    regex + known_pii                no NER
+                   │      [tool / tool_result] regex + known_pii + map replay   no NER
+                   │
+                   ├─ forward to upstream API  (pseudonymized request)
+                   │
+                   ├─ receive response
+                   │
+                   └─ deanonymize response  →  client sees real values
 ```
+
+**Provider routing** is path-based — no per-client config needed. Both providers share the same detection pipeline, session map, and pseudonym generator, so a name seen in an Anthropic session is already known if the same name appears in an OpenAI session.
 
 ### Detection pipeline (per text block)
 
@@ -43,7 +54,7 @@ First match wins — `known_pii > regex > NER` for the same string. Replacements
 
 ### Pseudonymization
 
-`fake_for(label, original)` seeds Faker with `md5(original)[:8]` so the same real value always produces the same fake. This keeps Anthropic's prompt cache warm and makes Claude's reasoning consistent across turns.
+`fake_for(label, original)` seeds Faker with `md5(original)[:8]` so the same real value always produces the same fake. This keeps the upstream prompt cache warm and makes the model's reasoning consistent across turns.
 
 | Label | Fake looks like |
 |---|---|
@@ -65,16 +76,20 @@ First match wins — `known_pii > regex > NER` for the same string. Replacements
 
 ```
 pii-proxy/
-├── pii_proxy.py          main proxy — request routing, anonymize/deanonymize, /health, /map
+├── pii_proxy.py          slim routing shell — routes by path, calls provider, /health, /map
+├── providers/
+│   ├── base.py           abstract Provider class + shared utilities
+│   ├── anthropic.py      Anthropic-specific body parsing and streaming (/v1/messages)
+│   └── openai.py         OpenAI-specific body parsing and streaming (/v1/chat/completions)
 ├── anonymizer.py         tiered detection pipeline, NER config, known_pii loader
 ├── pseudonymizer.py      deterministic Faker generator (fake_for)
 ├── secret_scan.py        credential regex patterns (SECRET_* labels)
 ├── session_map.py        persistent original→fake map with file locking
-├── config.py             port, paths, log level
+├── config.py             port, upstream URLs, paths, log level
 ├── requirements.txt      pip dependencies
 ├── known_pii.example.yaml  template for your PII list
 └── tests/
-    └── test_roundtrip.py   8 behavioral tests (run without a live proxy)
+    └── test_roundtrip.py   14 behavioral tests (run without a live proxy)
 ```
 
 ### Runtime files (outside project, protected from Claude)
@@ -121,13 +136,19 @@ chmod 600 ~/.pii-proxy/known_pii.yaml
 # edit with your real names, emails, phones, addresses, family, employer
 ```
 
-### 3. Route Claude Code through the proxy
+### 3. Route your AI clients through the proxy
 
-Add to `~/.zshrc` (or `~/.bashrc`):
+Add to `~/.zshrc` (or `~/.bashrc`) for whichever providers you use:
 
 ```bash
+# Claude Code / Anthropic SDK
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8082
+
+# OpenAI SDK
+export OPENAI_BASE_URL=http://127.0.0.1:8082
 ```
+
+Both can be set simultaneously — the proxy routes each request to the correct upstream based on the path.
 
 ### 4. Install the launchd service (auto-start on login)
 
@@ -212,13 +233,14 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
 tail -f /tmp/pii-proxy.err
 ```
 
-Each redaction line shows which section of the request body it came from:
+Each redaction line shows which section of the request body it came from. The labels are the same for both Anthropic and OpenAI requests:
 
 ```
-[system]      — Claude Code's system prompt (regex + known_pii only)
+[system]      — system prompt (regex + known_pii only)
 [user]        — latest user message gets full NER; history user messages get map replay
 [assistant]   — prior assistant turns (regex + known_pii only)
-[tool_result] — Read/Bash/etc. outputs (regex + known_pii + map replay)
+[tool]        — OpenAI tool role (map replay)
+[tool_result] — Anthropic tool_result blocks (regex + known_pii + map replay)
 ```
 
 Example output:
@@ -382,7 +404,7 @@ Enable PDF_SCAN for text-heavy documents where layout is not critical — contra
 
 spaCy used to run on every user message in the full conversation history, making NER cost grow linearly with conversation length. Now NER runs only on the latest user message; history is covered by map replay (Python `str.__contains__` in C — negligible). A 100-turn session costs the same NER time as a 1-turn session.
 
-The dominant latency is always Anthropic's own response time (1–30+ seconds). Proxy overhead is well under 100ms for typical sessions.
+The dominant latency is always the upstream API's response time (1–30+ seconds). Proxy overhead is well under 100ms for typical sessions.
 
 ---
 
@@ -397,6 +419,8 @@ The dominant latency is always Anthropic's own response time (1–30+ seconds). 
 | Map grows without bound | Each unique real value gets one entry | This is expected; entries are tiny (~100 bytes each) |
 | Fakes changed after map delete | Map deleted without proxy restart | Stop proxy → delete map → start proxy; never delete while running |
 | `ANTHROPIC_BASE_URL` not picked up | Env var set after Claude Code launched | Restart Claude Code after setting the env var |
+| `OPENAI_BASE_URL` not picked up | Env var set after client launched | Restart the OpenAI client after setting the env var |
+| OpenAI requests not redacted | Using wrong path | Confirm client sends to `/v1/chat/completions`; other paths pass through unmodified |
 
 ---
 
@@ -405,4 +429,4 @@ The dominant latency is always Anthropic's own response time (1–30+ seconds). 
 - `~/.pii-proxy/` is mode `0700`, `map.json` and `known_pii.yaml` are mode `0600`.
 - The `/map` endpoint binds to `127.0.0.1` only — not reachable from the network.
 - Deny rules in `~/.claude/settings.json` block Claude from reading `~/.pii-proxy/**` directly.
-- Secrets (AWS keys, tokens, etc.) are pseudonymized, not erased. The proxy holds the real value in memory and in `map.json`; Anthropic only ever sees the fake. De-anonymization restores real values so Claude-generated tool calls (e.g. writing a `.env` file) contain correct credentials on your disk.
+- Secrets (AWS keys, tokens, etc.) are pseudonymized, not erased. The proxy holds the real value in memory and in `map.json`; the upstream API only ever sees the fake. De-anonymization restores real values so model-generated tool calls (e.g. writing a `.env` file) contain correct credentials on your disk.

@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-PII Anonymization Proxy — sits between Claude Code and api.anthropic.com.
+PII Anonymization Proxy — sits between Claude Code / OpenAI clients and their upstream APIs.
 
 Start:  python pii_proxy.py
-Config: ANTHROPIC_BASE_URL=http://127.0.0.1:8082 (set in shell / launchd)
+Config: ANTHROPIC_BASE_URL=http://127.0.0.1:8082  (for Claude Code / Anthropic SDK)
+        OPENAI_BASE_URL=http://127.0.0.1:8082      (for OpenAI SDK)
 Health: curl http://localhost:8082/health
-Map:    curl http://localhost:8082/map     (debug — lists redactions)
+Map:    curl http://localhost:8082/map
 """
 
-import base64
-import json
 import logging
 
 import aiohttp
 from aiohttp import web
 
-from anonymizer import anonymize_text, load_known_pii, load_nlp
-from config import ANTHROPIC_BASE, KNOWN_PII_PATH, LOG_LEVEL, MAP_PATH, PDF_SCAN, PORT
+from anonymizer import load_known_pii, load_nlp
+from config import ANTHROPIC_BASE, KNOWN_PII_PATH, LOG_LEVEL, MAP_PATH, PORT
+from providers.anthropic import AnthropicProvider
+from providers.openai import OpenAIProvider
 from session_map import SessionMap
 
 logging.basicConfig(
@@ -31,136 +32,10 @@ _smap: SessionMap | None = None
 _nlp = None
 _known_pii: list[tuple[str, str]] = []
 
-
-# ── Anonymization helpers ─────────────────────────────────────────────────────
-
-def _maybe_pdf_to_text(block: dict) -> dict | None:
-    """If PDF_SCAN is enabled and block is a base64 PDF document, return a plain-text
-    block with the extracted content. Returns None if not applicable or disabled."""
-    if not PDF_SCAN or block.get("type") != "document":
-        return None
-    source = block.get("source", {})
-    if source.get("type") != "base64" or source.get("media_type") != "application/pdf":
-        return None
-    try:
-        import fitz  # pymupdf
-    except ImportError:
-        logger.warning("PDF_SCAN=true but pymupdf is not installed — pip install pymupdf")
-        return None
-    try:
-        raw = base64.b64decode(source.get("data", ""))
-        if not raw.startswith(b"%PDF"):
-            return None
-        with fitz.open(stream=raw, filetype="pdf") as doc:
-            pages = doc.page_count
-            text = "\n".join(page.get_text() for page in doc)
-        logger.info("  PDF extracted: %d page(s), %d chars", pages, len(text))
-        return {"type": "text", "text": text}
-    except Exception as e:
-        logger.warning("PDF extraction failed (%s) — passing document through unredacted", e)
-        return None
-
-
-def _anonymize_body(body: dict) -> dict:
-    """Mutate body in-place; return {original: fake} for everything replaced in this request."""
-    all_rep: dict[str, str] = {}
-
-    # NER is expensive and scales with conversation length. Only run it on the
-    # newest user message. History user messages use a cheap string-match against
-    # the session map instead — anything NER ever discovered is already stored
-    # there, so no coverage is lost.
-    messages = body.get("messages", [])
-    last_user_idx = max(
-        (i for i, m in enumerate(messages) if m.get("role") == "user"),
-        default=-1,
-    )
-
-    def _anon(text: str, ner: bool = True, section: str = "?", history: bool = False) -> str:
-        if history and _smap and _smap.forward:
-            # Augment known_pii with session_map entries that appear in this text.
-            # Pre-filtering with `k in text` keeps the list short before anonymize_text
-            # iterates it. Label "CACHED" is fine — replacement() returns the stored
-            # fake immediately for any key already in the map.
-            extra = [("CACHED", k) for k in _smap.forward if k in text]
-            effective_pii = list(_known_pii) + extra
-        else:
-            effective_pii = _known_pii
-        new_text, rep = anonymize_text(text, _nlp if ner else None, _smap, effective_pii)
-        for original, fake in rep.items():
-            logger.info("  [%s] redacted: %r → %r", section, original, fake)
-        all_rep.update(rep)
-        return new_text
-
-    # system prompt: regex + known_pii + secrets, no NER
-    if isinstance(body.get("system"), str):
-        body["system"] = _anon(body["system"], ner=False, section="system")
-    elif isinstance(body.get("system"), list):
-        for block in body["system"]:
-            if block.get("type") == "text":
-                block["text"] = _anon(block["text"], ner=False, section="system")
-
-    for i, msg in enumerate(messages):
-        content = msg.get("content")
-        role = msg.get("role", "?")
-        is_latest_user = (role == "user" and i == last_user_idx)
-        is_history_user = (role == "user" and i != last_user_idx)
-
-        if isinstance(content, str):
-            msg["content"] = _anon(content, ner=is_latest_user, section=role, history=is_history_user)
-        elif isinstance(content, list):
-            processed = []
-            for block in content:
-                # PDF document blocks: convert to text when PDF_SCAN is enabled.
-                # Builds a new list so block replacement is safe during iteration.
-                pdf_block = _maybe_pdf_to_text(block)
-                if pdf_block is not None:
-                    block = pdf_block
-
-                btype = block.get("type")
-                if btype == "text":
-                    processed.append({**block, "text": _anon(
-                        block["text"], ner=is_latest_user, section=role, history=is_history_user,
-                    )})
-                elif btype == "tool_result":
-                    tool_content = block.get("content", [])
-                    if isinstance(tool_content, str):
-                        processed.append({**block, "content": _anon(
-                            tool_content, ner=False, section="tool_result", history=True,
-                        )})
-                    else:
-                        new_inner = []
-                        for inner in tool_content:
-                            if isinstance(inner, dict):
-                                inner = _maybe_pdf_to_text(inner) or inner
-                                if inner.get("type") == "text":
-                                    inner = {**inner, "text": _anon(
-                                        inner["text"], ner=False, section="tool_result", history=True,
-                                    )}
-                            new_inner.append(inner)
-                        processed.append({**block, "content": new_inner})
-                else:
-                    processed.append(block)
-            msg["content"] = processed
-
-    return all_rep
-
-
-def _deanonymize_response(resp_body: dict) -> None:
-    for block in resp_body.get("content", []):
-        if block.get("type") == "text":
-            block["text"] = _smap.deanonymize(block["text"])
-        elif block.get("type") == "tool_use" and isinstance(block.get("input"), dict):
-            block["input"] = _deanonymize_obj(block["input"])
-
-
-def _deanonymize_obj(obj):
-    if isinstance(obj, str):
-        return _smap.deanonymize(obj)
-    if isinstance(obj, list):
-        return [_deanonymize_obj(x) for x in obj]
-    if isinstance(obj, dict):
-        return {k: _deanonymize_obj(v) for k, v in obj.items()}
-    return obj
+_PROVIDERS = {
+    "/v1/messages":         AnthropicProvider(),
+    "/v1/chat/completions": OpenAIProvider(),
+}
 
 
 # ── Request handlers ──────────────────────────────────────────────────────────
@@ -171,13 +46,16 @@ async def handle(request: web.Request) -> web.Response | web.StreamResponse:
         if k.lower() not in ("host", "content-length", "transfer-encoding")
     }
 
-    # Non-JSON or GET: pass through untouched.
-    if request.content_type != "application/json" or request.method == "GET":
+    provider = _PROVIDERS.get(request.path)
+    upstream = provider.base_url if provider else ANTHROPIC_BASE
+
+    # Non-JSON, GET, or unrecognised path: pass through untouched.
+    if request.content_type != "application/json" or request.method == "GET" or provider is None:
         raw = await request.read()
         async with aiohttp.ClientSession() as client:
             async with client.request(
                 request.method,
-                f"{ANTHROPIC_BASE}{request.path_qs}",
+                f"{upstream}{request.path_qs}",
                 data=raw,
                 headers=fwd_headers,
             ) as resp:
@@ -190,71 +68,23 @@ async def handle(request: web.Request) -> web.Response | web.StreamResponse:
     except Exception:
         return web.Response(status=400, text="invalid JSON")
 
-    replacements = _anonymize_body(body)
+    replacements = provider.anonymize_body(body, _smap, _nlp, _known_pii)
 
     if body.get("stream"):
-        return await _handle_stream(request, body, fwd_headers, replacements)
+        return await provider.handle_stream(request, body, fwd_headers, replacements, _smap)
 
     async with aiohttp.ClientSession() as client:
         async with client.post(
-            f"{ANTHROPIC_BASE}{request.path_qs}",
+            f"{upstream}{request.path_qs}",
             json=body,
             headers=fwd_headers,
         ) as resp:
             resp_body = await resp.json(content_type=None)
             resp_status = resp.status
 
-    _deanonymize_response(resp_body)
+    provider.deanonymize_response(resp_body, _smap)
     logger.info("anonymized=%d (map size=%d)", len(replacements), len(_smap.forward))
     return web.json_response(resp_body, status=resp_status)
-
-
-async def _handle_stream(
-    request: web.Request,
-    body: dict,
-    fwd_headers: dict,
-    replacements: dict,
-) -> web.StreamResponse:
-    response = web.StreamResponse(
-        status=200,
-        headers={"Content-Type": "text/event-stream; charset=utf-8"},
-    )
-    await response.prepare(request)
-
-    async with aiohttp.ClientSession() as client:
-        async with client.post(
-            f"{ANTHROPIC_BASE}{request.path_qs}",
-            json=body,
-            headers=fwd_headers,
-        ) as resp:
-            buf = ""
-            async for chunk in resp.content.iter_chunked(4096):
-                text = buf + chunk.decode("utf-8", errors="replace")
-                lines = text.split("\n")
-                buf = lines[-1]
-
-                for line in lines[:-1]:
-                    if line.startswith("data: ") and line != "data: [DONE]":
-                        payload = line[6:]
-                        try:
-                            data = json.loads(payload)
-                            delta = data.get("delta", {})
-                            dtype = delta.get("type")
-                            if dtype == "text_delta" and "text" in delta:
-                                delta["text"] = _smap.deanonymize(delta["text"])
-                            elif dtype == "input_json_delta" and "partial_json" in delta:
-                                delta["partial_json"] = _smap.deanonymize(delta["partial_json"])
-                            line = "data: " + json.dumps(data)
-                        except (json.JSONDecodeError, KeyError):
-                            pass
-                    await response.write((line + "\n").encode())
-
-            if buf:
-                await response.write(buf.encode())
-
-    logger.info("stream anonymized=%d (map size=%d)", len(replacements), len(_smap.forward))
-    await response.write_eof()
-    return response
 
 
 # ── Observability endpoints ───────────────────────────────────────────────────
@@ -281,6 +111,12 @@ async def _on_startup(app: web.Application) -> None:
     logger.info("PII proxy listening on 127.0.0.1:%d  (known_pii=%d, map=%d)",
                 PORT, len(_known_pii), len(_smap.forward))
 
+
+# Keep _maybe_pdf_to_text importable for the existing test_roundtrip.py tests that reference
+# pii_proxy._maybe_pdf_to_text directly.
+from providers.base import Provider as _P
+_maybe_pdf_to_text = _P._maybe_pdf_to_text
+PDF_SCAN = __import__("config").PDF_SCAN
 
 app = web.Application()
 app.on_startup.append(_on_startup)

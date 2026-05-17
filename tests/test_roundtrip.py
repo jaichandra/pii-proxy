@@ -124,13 +124,14 @@ def test_pdf_scan_extracts_and_anonymizes():
         "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64},
     }
 
+    import providers.base as _base
     import pii_proxy
-    orig_flag = pii_proxy.PDF_SCAN
-    pii_proxy.PDF_SCAN = True
+    orig_flag = _base.PDF_SCAN
+    _base.PDF_SCAN = True
     try:
         text_block = pii_proxy._maybe_pdf_to_text(block)
     finally:
-        pii_proxy.PDF_SCAN = orig_flag
+        _base.PDF_SCAN = orig_flag
 
     assert text_block is not None, "_maybe_pdf_to_text returned None"
     assert text_block["type"] == "text"
@@ -169,13 +170,14 @@ def test_pdf_scan_disabled_passes_through():
                    "data": base64.b64encode(buf.getvalue()).decode()},
     }
 
+    import providers.base as _base
     import pii_proxy
-    orig_flag = pii_proxy.PDF_SCAN
-    pii_proxy.PDF_SCAN = False
+    orig_flag = _base.PDF_SCAN
+    _base.PDF_SCAN = False
     try:
         result = pii_proxy._maybe_pdf_to_text(block)
     finally:
-        pii_proxy.PDF_SCAN = orig_flag
+        _base.PDF_SCAN = orig_flag
 
     assert result is None, "PDF_SCAN=False should return None (pass-through)"
 
@@ -187,6 +189,105 @@ def test_env_secret_value_only():
     anon, rep = anonymize_text(text, None, smap, None)
     assert "API_KEY=" in anon  # variable name preserved
     assert "sk-supersecretvalue123" not in anon
+
+
+def test_openai_string_content_anonymized():
+    """OpenAI string-content messages: latest user gets NER, system skips NER."""
+    from providers.openai import OpenAIProvider
+    provider = OpenAIProvider()
+    smap = fresh_map()
+    known_pii = [("EMAIL", "alice@corp.com")]
+    body = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Contact alice@corp.com about the project."},
+        ],
+    }
+    provider.anonymize_body(body, smap, NLP, known_pii)
+    system_content = body["messages"][0]["content"]
+    user_content = body["messages"][1]["content"]
+    assert "You are a helpful assistant." == system_content  # no PII to redact
+    assert "alice@corp.com" not in user_content
+    assert smap.deanonymize(user_content).replace(
+        smap.deanonymize(user_content), "Contact alice@corp.com about the project."
+    ) == "Contact alice@corp.com about the project."
+
+
+def test_openai_array_content_image_url_untouched():
+    """image_url parts must pass through unmodified; text parts get anonymized."""
+    from providers.openai import OpenAIProvider
+    provider = OpenAIProvider()
+    smap = fresh_map()
+    known_pii = [("EMAIL", "bob@example.com")]
+    image_part = {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+    body = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "Email bob@example.com for this image:"},
+                image_part,
+            ]},
+        ],
+    }
+    provider.anonymize_body(body, smap, NLP, known_pii)
+    parts = body["messages"][0]["content"]
+    text_part = parts[0]
+    img_part = parts[1]
+    assert "bob@example.com" not in text_part["text"]
+    assert img_part == image_part  # image_url unchanged
+
+
+def test_openai_tool_role_uses_map_replay():
+    """tool role uses map replay (history=True), not fresh NER."""
+    from providers.openai import OpenAIProvider
+    provider = OpenAIProvider()
+    smap = fresh_map()
+    known_pii = [("EMAIL", "carol@example.com")]
+    # Prime the session map by running a user message first
+    body_prime = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "Contact carol@example.com"}],
+    }
+    provider.anonymize_body(body_prime, smap, NLP, known_pii)
+    fake_email = smap.forward.get("carol@example.com")
+    assert fake_email is not None, "email not in session map after priming"
+
+    body = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": "done"},
+            {"role": "tool", "content": "Result for carol@example.com"},
+        ],
+    }
+    provider.anonymize_body(body, smap, NLP, known_pii)
+    tool_content = body["messages"][1]["content"]
+    assert fake_email in tool_content, "tool role did not replace via map replay"
+
+
+def test_openai_deanonymize_response():
+    """Non-streaming OpenAI response: choices[].message.content is deanonymized."""
+    from providers.openai import OpenAIProvider
+    provider = OpenAIProvider()
+    smap = fresh_map()
+    known_pii = [("EMAIL", "dave@example.com")]
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "What is dave@example.com?"}],
+    }
+    provider.anonymize_body(body, smap, NLP, known_pii)
+    fake_email = smap.forward.get("dave@example.com")
+    assert fake_email is not None
+
+    # Simulate an upstream response that echoes the fake email
+    resp_body = {
+        "choices": [
+            {"message": {"role": "assistant", "content": f"The email is {fake_email}."}}
+        ]
+    }
+    provider.deanonymize_response(resp_body, smap)
+    restored = resp_body["choices"][0]["message"]["content"]
+    assert "dave@example.com" in restored, f"deanonymize did not restore real email: {restored!r}"
 
 
 if __name__ == "__main__":

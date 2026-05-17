@@ -1,6 +1,7 @@
 import os
 
-ANTHROPIC_BASE = "https://api.anthropic.com"
+ANTHROPIC_BASE = os.environ.get("PII_ANTHROPIC_BASE", "https://api.anthropic.com")
+OPENAI_BASE    = os.environ.get("PII_OPENAI_BASE",    "https://api.openai.com")
 PORT = 8082
 SESSION_TTL = 3600   # seconds; idle sessions older than this are evicted
 LOG_LEVEL = "INFO"
