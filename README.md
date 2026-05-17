@@ -289,13 +289,31 @@ Claude Code sends PDFs to the API as base64-encoded `type: document` blocks. The
 
 ### Enabling PDF scanning (opt-in)
 
-Set the environment variable before starting the proxy:
+**Option A — shell session only** (temporary, lost on restart):
 
 ```bash
 export PII_PDF_SCAN=true
 ```
 
-Or add it to the launchd plist under `EnvironmentVariables`.
+**Option B — launchd plist** (permanent, survives reboots):
+
+Edit `~/Library/LaunchAgents/com.jai.pii-proxy.plist` and add `PII_PDF_SCAN` to the `EnvironmentVariables` dict:
+
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+  <key>PATH</key>
+  <string>/usr/local/bin:/usr/bin:/bin</string>
+  <key>PII_PDF_SCAN</key>
+  <string>true</string>
+</dict>
+```
+
+Then reload the service to pick up the change:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.jai.pii-proxy
+```
 
 Also install the required dependency:
 
