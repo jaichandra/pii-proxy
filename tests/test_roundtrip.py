@@ -97,6 +97,89 @@ def test_longest_first_replacement():
     assert smap.deanonymize(anon) == text
 
 
+def test_pdf_scan_extracts_and_anonymizes():
+    """PDF document block is converted to text and all PII types are pseudonymized."""
+    try:
+        import base64
+        import fitz
+        import io
+    except ImportError:
+        print("SKIP  test_pdf_scan (pymupdf not installed)")
+        return
+
+    # Build a PDF containing email, phone, SSN, and a name
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 80),  "Confidential Record")
+    page.insert_text((50, 110), "Name:  Jane Doe")
+    page.insert_text((50, 135), "Email: jane.doe@secret.com")
+    page.insert_text((50, 160), "Phone: +1-800-555-9876")
+    page.insert_text((50, 185), "SSN:   123-45-6789")
+    buf = io.BytesIO()
+    doc.save(buf)
+    pdf_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    block = {
+        "type": "document",
+        "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64},
+    }
+
+    import pii_proxy
+    orig_flag = pii_proxy.PDF_SCAN
+    pii_proxy.PDF_SCAN = True
+    try:
+        text_block = pii_proxy._maybe_pdf_to_text(block)
+    finally:
+        pii_proxy.PDF_SCAN = orig_flag
+
+    assert text_block is not None, "_maybe_pdf_to_text returned None"
+    assert text_block["type"] == "text"
+    extracted = text_block["text"]
+    assert "jane.doe@secret.com" in extracted, "email not in extracted text"
+
+    # Run the full anonymization pipeline on the extracted text
+    smap = fresh_map()
+    known_pii = [("PERSON", "Jane Doe")]
+    anon, rep = anonymize_text(extracted, NLP, smap, known_pii)
+
+    assert "jane.doe@secret.com" not in anon, "email not redacted"
+    assert "123-45-6789" not in anon, "SSN not redacted"
+    assert "+1-800-555-9876" not in anon, "phone not redacted"
+    assert "Jane Doe" not in anon, "name not redacted"
+    assert smap.deanonymize(anon) == extracted, "deanonymize did not restore original"
+
+
+def test_pdf_scan_disabled_passes_through():
+    """When PDF_SCAN is off, _maybe_pdf_to_text returns None and the block is unchanged."""
+    try:
+        import base64
+        import fitz
+        import io
+    except ImportError:
+        print("SKIP  test_pdf_scan_disabled (pymupdf not installed)")
+        return
+
+    doc = fitz.open()
+    doc.new_page().insert_text((50, 100), "sensitive@example.com")
+    buf = io.BytesIO()
+    doc.save(buf)
+    block = {
+        "type": "document",
+        "source": {"type": "base64", "media_type": "application/pdf",
+                   "data": base64.b64encode(buf.getvalue()).decode()},
+    }
+
+    import pii_proxy
+    orig_flag = pii_proxy.PDF_SCAN
+    pii_proxy.PDF_SCAN = False
+    try:
+        result = pii_proxy._maybe_pdf_to_text(block)
+    finally:
+        pii_proxy.PDF_SCAN = orig_flag
+
+    assert result is None, "PDF_SCAN=False should return None (pass-through)"
+
+
 def test_env_secret_value_only():
     """For KEY=value, only the value should be pseudonymized, not the KEY name."""
     smap = fresh_map()
