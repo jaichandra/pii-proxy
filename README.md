@@ -281,6 +281,69 @@ EOF
 
 ---
 
+## PDF handling
+
+### Default behaviour (PDF_SCAN disabled)
+
+Claude Code sends PDFs to the API as base64-encoded `type: document` blocks. The proxy forwards these **unmodified** — the binary content passes straight through and Anthropic's servers decode it server-side. No PII scanning occurs on PDF content.
+
+### Enabling PDF scanning (opt-in)
+
+Set the environment variable before starting the proxy:
+
+```bash
+export PII_PDF_SCAN=true
+```
+
+Or add it to the launchd plist under `EnvironmentVariables`.
+
+Also install the required dependency:
+
+```bash
+./venv/bin/pip install "pymupdf>=1.24"
+```
+
+When enabled, the proxy intercepts every `type: document` PDF block, extracts the text using pymupdf, runs the full detection pipeline on it, and **replaces the document block with a plain-text block** containing the pseudonymized content. Claude never sees the original PDF bytes.
+
+### What PDF_SCAN catches
+
+The full pipeline runs on extracted PDF text — same as a user message:
+
+| PII type | Caught? |
+|---|---|
+| Email addresses | Yes — regex |
+| Phone numbers | Yes — regex |
+| SSN, credit cards | Yes — regex |
+| API keys, tokens, secrets | Yes — secret scan |
+| Names from `known_pii.yaml` | Yes — exact match |
+| Previously seen names (NER-discovered) | Yes — map replay |
+| Unknown names/places not in map | Yes — NER (applied as latest-message scope) |
+
+### Tradeoffs with PDF_SCAN enabled
+
+| | PDF_SCAN off | PDF_SCAN on |
+|---|---|---|
+| PII in PDFs redacted | No | Yes |
+| Claude sees PDF formatting | Yes | No — plain text only |
+| Claude sees images in the PDF | Yes | No — images are discarded |
+| Tables / columns | Preserved | May be mangled (text extraction order varies) |
+| Scanned PDFs (image-based) | Readable by Claude | Blank — no text layer to extract |
+| Multi-column layouts | Preserved | May read in wrong order |
+| Processing overhead | None | pymupdf extraction (~5–20ms per page) |
+
+### Gaps even with PDF_SCAN enabled
+
+- **Scanned / image-only PDFs** (e.g. a photographed document saved as PDF): no text layer exists, extraction returns empty, document is dropped. Use an OCR step outside the proxy if needed.
+- **Embedded images inside PDFs**: photos, diagrams, and image-based tables within an otherwise text PDF are silently discarded.
+- **Handwritten content**: not extractable via text layer.
+- **PII in PDF metadata** (author, title fields): not currently scanned.
+
+### Recommendation
+
+Enable PDF_SCAN for text-heavy documents where layout is not critical — contracts, reports, email threads saved as PDF, HR documents. Leave it disabled when Claude needs to reason about visual layout, forms, or embedded images.
+
+---
+
 ## Performance
 
 | Component | Cost | Scales with |

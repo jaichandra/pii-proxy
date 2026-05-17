@@ -3,3 +3,6 @@ spacy>=3.7
 faker>=24
 pyyaml>=6
 # After installing: python -m spacy download en_core_web_lg
+
+# Optional — only needed when PII_PDF_SCAN=true
+pymupdf>=1.24

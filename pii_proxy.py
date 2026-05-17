@@ -8,6 +8,7 @@ Health: curl http://localhost:8082/health
 Map:    curl http://localhost:8082/map     (debug — lists redactions)
 """
 
+import base64
 import json
 import logging
 
@@ -15,7 +16,7 @@ import aiohttp
 from aiohttp import web
 
 from anonymizer import anonymize_text, load_known_pii, load_nlp
-from config import ANTHROPIC_BASE, KNOWN_PII_PATH, LOG_LEVEL, MAP_PATH, PORT
+from config import ANTHROPIC_BASE, KNOWN_PII_PATH, LOG_LEVEL, MAP_PATH, PDF_SCAN, PORT
 from session_map import SessionMap
 
 logging.basicConfig(
@@ -32,6 +33,33 @@ _known_pii: list[tuple[str, str]] = []
 
 
 # ── Anonymization helpers ─────────────────────────────────────────────────────
+
+def _maybe_pdf_to_text(block: dict) -> dict | None:
+    """If PDF_SCAN is enabled and block is a base64 PDF document, return a plain-text
+    block with the extracted content. Returns None if not applicable or disabled."""
+    if not PDF_SCAN or block.get("type") != "document":
+        return None
+    source = block.get("source", {})
+    if source.get("type") != "base64" or source.get("media_type") != "application/pdf":
+        return None
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        logger.warning("PDF_SCAN=true but pymupdf is not installed — pip install pymupdf")
+        return None
+    try:
+        raw = base64.b64decode(source.get("data", ""))
+        if not raw.startswith(b"%PDF"):
+            return None
+        with fitz.open(stream=raw, filetype="pdf") as doc:
+            pages = doc.page_count
+            text = "\n".join(page.get_text() for page in doc)
+        logger.info("  PDF extracted: %d page(s), %d chars", pages, len(text))
+        return {"type": "text", "text": text}
+    except Exception as e:
+        logger.warning("PDF extraction failed (%s) — passing document through unredacted", e)
+        return None
+
 
 def _anonymize_body(body: dict) -> dict:
     """Mutate body in-place; return {original: fake} for everything replaced in this request."""
@@ -80,20 +108,39 @@ def _anonymize_body(body: dict) -> dict:
         if isinstance(content, str):
             msg["content"] = _anon(content, ner=is_latest_user, section=role, history=is_history_user)
         elif isinstance(content, list):
+            processed = []
             for block in content:
+                # PDF document blocks: convert to text when PDF_SCAN is enabled.
+                # Builds a new list so block replacement is safe during iteration.
+                pdf_block = _maybe_pdf_to_text(block)
+                if pdf_block is not None:
+                    block = pdf_block
+
                 btype = block.get("type")
                 if btype == "text":
-                    block["text"] = _anon(
+                    processed.append({**block, "text": _anon(
                         block["text"], ner=is_latest_user, section=role, history=is_history_user,
-                    )
+                    )})
                 elif btype == "tool_result":
                     tool_content = block.get("content", [])
                     if isinstance(tool_content, str):
-                        block["content"] = _anon(tool_content, ner=False, section="tool_result", history=True)
+                        processed.append({**block, "content": _anon(
+                            tool_content, ner=False, section="tool_result", history=True,
+                        )})
                     else:
+                        new_inner = []
                         for inner in tool_content:
-                            if isinstance(inner, dict) and inner.get("type") == "text":
-                                inner["text"] = _anon(inner["text"], ner=False, section="tool_result", history=True)
+                            if isinstance(inner, dict):
+                                inner = _maybe_pdf_to_text(inner) or inner
+                                if inner.get("type") == "text":
+                                    inner = {**inner, "text": _anon(
+                                        inner["text"], ner=False, section="tool_result", history=True,
+                                    )}
+                            new_inner.append(inner)
+                        processed.append({**block, "content": new_inner})
+                else:
+                    processed.append(block)
+            msg["content"] = processed
 
     return all_rep
 
