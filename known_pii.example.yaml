@@ -1,0 +1,41 @@
+# Known PII list — copy to ~/.pii-proxy/known_pii.yaml and edit.
+# Anything listed here is YOUR PII that should always be pseudonymized.
+#
+# Every string listed here will be replaced with a stable Faker-generated fake
+# before being sent to Anthropic. The same real value always maps to the same
+# fake value (so Anthropic's prompt cache stays warm and Claude can reason
+# consistently about "you" or "your spouse" across turns).
+#
+# Add aliases generously — "John", "JS", and "John Smith" should all be listed
+# if you go by any of them.
+
+identity:
+  names:
+    - John Smith
+    - John
+    - JS
+  emails:
+    - john@example.com
+    - jsmith@company.com
+  phones:
+    - "+1-555-555-1234"
+  addresses:
+    - 123 Main St, Springfield IL 62701
+
+employer:
+  names:
+    - ACME Corporation
+    - ACME
+  domains:
+    - acme.com
+
+family:
+  - names: ["Jane Smith", "Jane"]
+    relationship: spouse
+  - names: ["Junior Smith", "Junior"]
+    relationship: child
+
+projects:
+  # Internal project codenames you don't want Anthropic to see by their real name.
+  - codename: Aurora
+    real_name: BigCustomerDeal
