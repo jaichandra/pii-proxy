@@ -309,10 +309,17 @@ Edit `~/Library/LaunchAgents/com.jai.pii-proxy.plist` and add `PII_PDF_SCAN` to 
 </dict>
 ```
 
-Then reload the service to pick up the change:
+Then do a full plist reload to pick up the new env var (`kickstart -k` restarts the process but does not re-read the plist):
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.jai.pii-proxy
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
+```
+
+Verify the env var is live in the process before testing:
+
+```bash
+launchctl print gui/$(id -u)/com.jai.pii-proxy | grep PII_PDF_SCAN
 ```
 
 Also install the required dependency:
