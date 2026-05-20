@@ -39,3 +39,12 @@ projects:
   # Internal project codenames you don't want Anthropic to see by their real name.
   - codename: Aurora
     real_name: BigCustomerDeal
+
+# Ignore list — values here are NEVER pseudonymized, even if they match a regex
+# or NER pattern. Useful for port numbers, internal IPs, version strings, or
+# any value the detection pipeline flags incorrectly.
+ignore:
+  - 8082          # proxy port — not sensitive
+  - 127.0.0.1     # localhost — not sensitive
+  # - 10.0.0.1    # internal IP you reference constantly
+  # - v2.1.3      # version string caught by the IP regex

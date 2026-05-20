@@ -48,7 +48,7 @@ Stage 3  spaCy NER        PERSON (≥2 words), GPE, LOC  — latest user message
 Stage 3' map replay       fast string-match against session map  — history messages
 ```
 
-First match wins — `known_pii > regex > NER` for the same string. Replacements are applied longest-first to prevent partial matches (e.g. "John" never clobbers "Johnson").
+First match wins — `known_pii > regex > NER` for the same string. Values listed under `ignore:` are exempt from all stages. Replacements are applied longest-first to prevent partial matches (e.g. "John" never clobbers "Johnson").
 
 **NER scoping:** spaCy only runs on the newest user message. All prior user messages and tool results use a fast string-match against `session_map.forward` instead — anything NER ever discovered is already stored there, so no coverage is lost and NER cost stays constant regardless of conversation length.
 
@@ -192,6 +192,11 @@ family:
 projects:
   - codename: InternalName
     real_name: ExternalBrandName
+
+ignore:
+  - 8082        # port number — not sensitive
+  - 127.0.0.1   # localhost — not sensitive
+  # - v2.1.3   # version string the IP regex catches incorrectly
 ```
 
 - List every alias you go by — the proxy only catches exact matches in Stage 1.

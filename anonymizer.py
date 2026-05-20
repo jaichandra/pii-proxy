@@ -118,6 +118,10 @@ def load_known_pii(path: str) -> list[tuple[str, str]]:
         if proj.get("real_name"):
             entries.append(("ORG", proj["real_name"]))
 
+    for v in data.get("ignore", []) or []:
+        if v:
+            entries.append(("IGNORE", str(v)))
+
     logger.info("loaded %d known_pii entries from %s", len(entries), path)
     return entries
 
@@ -163,6 +167,13 @@ def anonymize_text(
         for ent in nlp(text).ents:
             if ent.label_ in _NER_LABELS and _should_anonymize_ent(ent):
                 candidates.append((ent.label_, ent.text))
+
+    # Build ignore set from IGNORE-labelled entries
+    ignore_set = {v for label, v in (known_pii or []) if label == "IGNORE"}
+
+    # Drop any candidate whose value is in the ignore set
+    if ignore_set:
+        candidates = [(l, o) for l, o in candidates if o not in ignore_set]
 
     # Dedupe — first occurrence wins (so known_pii > regex > NER for the same string)
     seen = set()
