@@ -56,17 +56,19 @@ First match wins — `known_pii > regex > NER` for the same string. Replacements
 
 `fake_for(label, original)` seeds Faker with `md5(original)[:8]` so the same real value always produces the same fake. This keeps the upstream prompt cache warm and makes the model's reasoning consistent across turns.
 
-| Label | Fake looks like |
-|---|---|
-| PERSON | `Grace Daniels` |
-| EMAIL | `johnsonkenneth@example.com` |
-| PHONE | `+1-800-555-0199` |
-| ADDRESS | `USS Steele, FPO AE 36325` |
-| EMPLOYER / ORG | `Steele, Bond and Huff` |
-| SECRET_AWS_KEY | `AKIAxxx...` (AKIA prefix preserved) |
-| SECRET_GITHUB_PAT | `ghp_xxx...` |
-| SECRET_JWT | same segment lengths, random base64 |
-| IP_ADDRESS | valid random IPv4 |
+
+| Label             | Fake looks like                      |
+| ----------------- | ------------------------------------ |
+| PERSON            | `Grace Daniels`                      |
+| EMAIL             | `johnsonkenneth@example.com`         |
+| PHONE             | `+1-800-555-0199`                    |
+| ADDRESS           | `USS Steele, FPO AE 36325`           |
+| EMPLOYER / ORG    | `Steele, Bond and Huff`              |
+| SECRET_AWS_KEY    | `AKIAxxx...` (AKIA prefix preserved) |
+| SECRET_GITHUB_PAT | `ghp_xxx...`                         |
+| SECRET_JWT        | same segment lengths, random base64  |
+| IP_ADDRESS        | valid random IPv4                    |
+
 
 ---
 
@@ -244,6 +246,7 @@ Each redaction line shows which section of the request body it came from. The la
 ```
 
 Example output:
+
 ```
 2026-05-17 08:29:30 INFO   [system] redacted: 'you@email.com' → 'fake@example.net'
 2026-05-17 08:29:30 INFO   [user] redacted: 'Your Name' → 'Karen Jefferson'
@@ -356,27 +359,31 @@ When enabled, the proxy intercepts every `type: document` PDF block, extracts th
 
 The full pipeline runs on extracted PDF text — same as a user message:
 
-| PII type | Caught? |
-|---|---|
-| Email addresses | Yes — regex |
-| Phone numbers | Yes — regex |
-| SSN, credit cards | Yes — regex |
-| API keys, tokens, secrets | Yes — secret scan |
-| Names from `known_pii.yaml` | Yes — exact match |
-| Previously seen names (NER-discovered) | Yes — map replay |
-| Unknown names/places not in map | Yes — NER (applied as latest-message scope) |
+
+| PII type                               | Caught?                                     |
+| -------------------------------------- | ------------------------------------------- |
+| Email addresses                        | Yes — regex                                 |
+| Phone numbers                          | Yes — regex                                 |
+| SSN, credit cards                      | Yes — regex                                 |
+| API keys, tokens, secrets              | Yes — secret scan                           |
+| Names from `known_pii.yaml`            | Yes — exact match                           |
+| Previously seen names (NER-discovered) | Yes — map replay                            |
+| Unknown names/places not in map        | Yes — NER (applied as latest-message scope) |
+
 
 ### Tradeoffs with PDF_SCAN enabled
 
-| | PDF_SCAN off | PDF_SCAN on |
-|---|---|---|
-| PII in PDFs redacted | No | Yes |
-| Claude sees PDF formatting | Yes | No — plain text only |
-| Claude sees images in the PDF | Yes | No — images are discarded |
-| Tables / columns | Preserved | May be mangled (text extraction order varies) |
-| Scanned PDFs (image-based) | Readable by Claude | Blank — no text layer to extract |
-| Multi-column layouts | Preserved | May read in wrong order |
-| Processing overhead | None | pymupdf extraction (~5–20ms per page) |
+
+|                               | PDF_SCAN off       | PDF_SCAN on                                   |
+| ----------------------------- | ------------------ | --------------------------------------------- |
+| PII in PDFs redacted          | No                 | Yes                                           |
+| Claude sees PDF formatting    | Yes                | No — plain text only                          |
+| Claude sees images in the PDF | Yes                | No — images are discarded                     |
+| Tables / columns              | Preserved          | May be mangled (text extraction order varies) |
+| Scanned PDFs (image-based)    | Readable by Claude | Blank — no text layer to extract              |
+| Multi-column layouts          | Preserved          | May read in wrong order                       |
+| Processing overhead           | None               | pymupdf extraction (~5–20ms per page)         |
+
 
 ### Gaps even with PDF_SCAN enabled
 
@@ -393,14 +400,16 @@ Enable PDF_SCAN for text-heavy documents where layout is not critical — contra
 
 ## Performance
 
-| Component | Cost | Scales with |
-|---|---|---|
-| spaCy NER | 5–50ms | fixed per request (latest message only) |
-| Regex + secret scan | <1ms | message size |
-| Map replay (history) | <1ms | session map size × history length |
-| Streaming deanonymize | <1ms per chunk | chunk size |
-| Localhost loopback | <1ms | — |
-| spaCy model in RAM | ~685MB fixed | — |
+
+| Component             | Cost           | Scales with                             |
+| --------------------- | -------------- | --------------------------------------- |
+| spaCy NER             | 5–50ms         | fixed per request (latest message only) |
+| Regex + secret scan   | <1ms           | message size                            |
+| Map replay (history)  | <1ms           | session map size × history length       |
+| Streaming deanonymize | <1ms per chunk | chunk size                              |
+| Localhost loopback    | <1ms           | —                                       |
+| spaCy model in RAM    | ~685MB fixed   | —                                       |
+
 
 spaCy used to run on every user message in the full conversation history, making NER cost grow linearly with conversation length. Now NER runs only on the latest user message; history is covered by map replay (Python `str.__contains__` in C — negligible). A 100-turn session costs the same NER time as a 1-turn session.
 
@@ -410,17 +419,19 @@ The dominant latency is always the upstream API's response time (1–30+ seconds
 
 ## Common issues
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `curl health` returns connection refused | Proxy not running | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist` |
-| spaCy model not found at startup | Model installed to wrong venv | Install the wheel directly into `venv/` — see Setup step 1 |
-| Real name not redacted | Single-word name not in `known_pii.yaml` | NER requires ≥2 words; add the name explicitly to the YAML |
-| PII appears in Claude's response | Tool input not deanonymized | Streaming tool inputs (`input_json_delta`) are deanonymized; check logs for missing label |
-| Map grows without bound | Each unique real value gets one entry | This is expected; entries are tiny (~100 bytes each) |
-| Fakes changed after map delete | Map deleted without proxy restart | Stop proxy → delete map → start proxy; never delete while running |
-| `ANTHROPIC_BASE_URL` not picked up | Env var set after Claude Code launched | Restart Claude Code after setting the env var |
-| `OPENAI_BASE_URL` not picked up | Env var set after client launched | Restart the OpenAI client after setting the env var |
-| OpenAI requests not redacted | Using wrong path | Confirm client sends to `/v1/chat/completions`; other paths pass through unmodified |
+
+| Symptom                                  | Cause                                    | Fix                                                                                       |
+| ---------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `curl health` returns connection refused | Proxy not running                        | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist`         |
+| spaCy model not found at startup         | Model installed to wrong venv            | Install the wheel directly into `venv/` — see Setup step 1                                |
+| Real name not redacted                   | Single-word name not in `known_pii.yaml` | NER requires ≥2 words; add the name explicitly to the YAML                                |
+| PII appears in Claude's response         | Tool input not deanonymized              | Streaming tool inputs (`input_json_delta`) are deanonymized; check logs for missing label |
+| Map grows without bound                  | Each unique real value gets one entry    | This is expected; entries are tiny (~100 bytes each)                                      |
+| Fakes changed after map delete           | Map deleted without proxy restart        | Stop proxy → delete map → start proxy; never delete while running                         |
+| `ANTHROPIC_BASE_URL` not picked up       | Env var set after Claude Code launched   | Restart Claude Code after setting the env var                                             |
+| `OPENAI_BASE_URL` not picked up          | Env var set after client launched        | Restart the OpenAI client after setting the env var                                       |
+| OpenAI requests not redacted             | Using wrong path                         | Confirm client sends to `/v1/chat/completions`; other paths pass through unmodified       |
+
 
 ---
 
@@ -430,3 +441,4 @@ The dominant latency is always the upstream API's response time (1–30+ seconds
 - The `/map` endpoint binds to `127.0.0.1` only — not reachable from the network.
 - Deny rules in `~/.claude/settings.json` block Claude from reading `~/.pii-proxy/**` directly.
 - Secrets (AWS keys, tokens, etc.) are pseudonymized, not erased. The proxy holds the real value in memory and in `map.json`; the upstream API only ever sees the fake. De-anonymization restores real values so model-generated tool calls (e.g. writing a `.env` file) contain correct credentials on your disk.
+
