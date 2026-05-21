@@ -135,6 +135,43 @@ def _apply(text: str, original: str, fake: str) -> str:
     return text.replace(original, fake)
 
 
+
+
+# ── File-path and localhost-URL exemptions ─────────────────────────────────────
+
+# Matches the username segment in /Users/<name>/ or /home/<name>/ paths
+_USER_PATH_RE = re.compile(r'(/(?:Users|home)/)([^/\x00]+)(?=/)')
+
+_LOCAL_HOST_RE = re.compile(
+    r'^(?:localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|::1)(?::\d+)?$'
+)
+
+
+def _mask_path_usernames(text: str) -> tuple[str, dict]:
+    """Replace /Users/<name>/ username segments with opaque tokens."""
+    tokens: dict[str, str] = {}
+    for i, m in enumerate(reversed(list(_USER_PATH_RE.finditer(text)))):
+        tok = f'\x00U{i}\x00'
+        tokens[tok] = m.group(2)
+        text = text[:m.start(2)] + tok + text[m.end(2):]
+    return text, tokens
+
+
+def _unmask_path_usernames(text: str, tokens: dict) -> str:
+    for tok, val in tokens.items():
+        text = text.replace(tok, val)
+    return text
+
+
+def _is_local_url(value: str) -> bool:
+    m = re.match(r'https?://([^/?#:]+)', value)
+    return bool(m and _LOCAL_HOST_RE.match(m.group(1)))
+
+
+def _is_local_address(value: str) -> bool:
+    """True for loopback URLs and bare IPs — exempt regardless of detection label."""
+    return _is_local_url(value) or bool(_LOCAL_HOST_RE.match(value))
+
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 def anonymize_text(
@@ -144,6 +181,9 @@ def anonymize_text(
     known_pii: list[tuple[str, str]] | None = None,
 ) -> tuple[str, dict]:
     """Return (anonymized_text, {original: fake}) using the tiered pipeline."""
+    # Protect /Users/<name>/ path usernames from anonymization
+    text, _path_tokens = _mask_path_usernames(text)
+
     # Collect (label, original) candidates from all stages without mutating text.
     candidates: list[tuple[str, str]] = []
 
@@ -175,6 +215,9 @@ def anonymize_text(
     if ignore_set:
         candidates = [(l, o) for l, o in candidates if o not in ignore_set]
 
+    # Exempt loopback addresses (URLs and bare IPs) regardless of label — includes CACHED map-replay entries
+    candidates = [(l, v) for l, v in candidates if not _is_local_address(v)]
+
     # Dedupe — first occurrence wins (so known_pii > regex > NER for the same string)
     seen = set()
     unique: list[tuple[str, str]] = []
@@ -194,4 +237,6 @@ def anonymize_text(
         text = _apply(text, original, fake)
         replacements[original] = fake
 
+    # Restore masked path components
+    text = _unmask_path_usernames(text, _path_tokens)
     return text, replacements

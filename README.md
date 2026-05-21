@@ -1,43 +1,52 @@
 # pii-proxy
 
-A local reverse proxy that sits between your AI clients and their upstream APIs. It intercepts every outgoing request, replaces personal information and credentials with realistic Faker-generated pseudonyms, then restores the real values in responses before they reach the screen. The AI provider never sees your real PII.
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org)
 
-Supports **Anthropic** (`/v1/messages`) and **OpenAI** (`/v1/chat/completions`) — both providers get identical PII protection through the same proxy instance.
+A local reverse proxy that intercepts every outgoing request to Anthropic and OpenAI, replaces personal information and credentials with realistic pseudonyms, then restores the real values in responses — so the AI provider never sees your actual PII.
+
+---
+
+## Why pii-proxy
+
+- **Zero changes to your prompts.** Route your AI client through the proxy with one env var. Your workflow stays identical.
+- **Deterministic pseudonyms.** The same real value always produces the same fake, keeping the model's reasoning consistent and the upstream prompt cache warm.
+- **Full round-trip fidelity.** Responses are de-anonymized before they reach your screen. Tool calls and file writes contain the correct real values.
+- **Covers what you forget.** Beyond your explicit PII list, the proxy runs regex (email, phone, SSN, credit card, IP, ZIP, URL), a credential scanner (AWS keys, GitHub tokens, JWTs, Stripe keys, `.env`-style secrets), and spaCy NER — catching names and places you didn't think to list.
+- **Multi-provider, single instance.** One proxy handles both Anthropic (`/v1/messages`) and OpenAI (`/v1/chat/completions`) simultaneously.
 
 ---
 
 ## How it works
 
 ```
-Claude Code          OpenAI SDK client
-    │  ANTHROPIC_BASE_URL=      │  OPENAI_BASE_URL=
-    │  http://127.0.0.1:8082    │  http://127.0.0.1:8082
-    └──────────────┬────────────┘
-                   ▼
-        pii_proxy.py  (aiohttp, port 8082)
-                   │
-                   ├─ route by path ─────────────────────────────────────
-                   │      /v1/messages          →  AnthropicProvider
-                   │      /v1/chat/completions  →  OpenAIProvider
-                   │      everything else       →  pass through untouched
-                   │
-                   ├─ anonymize request body  ───────────────────────────
-                   │      [system prompt]      regex + known_pii                no NER
-                   │      [latest user msg]    regex + known_pii + NER          full pipeline
-                   │      [history user msgs]  regex + known_pii + map replay   no NER (fast)
-                   │      [assistant turns]    regex + known_pii                no NER
-                   │      [tool / tool_result] regex + known_pii + map replay   no NER
-                   │
-                   ├─ forward to upstream API  (pseudonymized request)
-                   │
-                   ├─ receive response
-                   │
-                   └─ deanonymize response  →  client sees real values
+Claude Code                OpenAI SDK client
+    │  ANTHROPIC_BASE_URL=     │  OPENAI_BASE_URL=
+    │  http://localhost:8082    │  http://localhost:8082
+    └─────────────┬────────────┘
+                  ▼
+       pii_proxy.py  (aiohttp, port 8082)
+                  │
+                  ├─ route by path ──────────────────────────────────
+                  │      /v1/messages          →  AnthropicProvider
+                  │      /v1/chat/completions  →  OpenAIProvider
+                  │      everything else       →  pass through untouched
+                  │
+                  ├─ anonymize request body  ────────────────────────────
+                  │      [system prompt]      regex + known_pii                no NER
+                  │      [latest user msg]    regex + known_pii + NER          full pipeline
+                  │      [history user msgs]  regex + known_pii + map replay   no NER (fast)
+                  │      [assistant turns]    regex + known_pii                no NER
+                  │      [tool / tool_result] regex + known_pii + map replay   no NER
+                  │
+                  ├─ forward to upstream API  (pseudonymized request)
+                  │
+                  ├─ receive response
+                  │
+                  └─ deanonymize response  →  client sees real values
 ```
 
-**Provider routing** is path-based — no per-client config needed. Both providers share the same detection pipeline, session map, and pseudonym generator, so a name seen in an Anthropic session is already known if the same name appears in an OpenAI session.
-
-### Detection pipeline (per text block)
+### Detection pipeline
 
 ```
 Stage 1  known_pii.yaml   exact match (highest precision, zero false positives)
@@ -50,74 +59,37 @@ Stage 3' map replay       fast string-match against session map  — history mes
 
 First match wins — `known_pii > regex > NER` for the same string. Values listed under `ignore:` are exempt from all stages. Replacements are applied longest-first to prevent partial matches (e.g. "John" never clobbers "Johnson").
 
-**NER scoping:** spaCy only runs on the newest user message. All prior user messages and tool results use a fast string-match against `session_map.forward` instead — anything NER ever discovered is already stored there, so no coverage is lost and NER cost stays constant regardless of conversation length.
+**NER scoping:** spaCy only runs on the newest user message. All prior user messages and tool results use a fast string-match against the session map — anything NER ever discovered is already stored there, so no coverage is lost and NER cost stays constant regardless of conversation length.
+
+**File path and localhost exemptions:** Username segments inside `/Users/<name>/` and `/home/<name>/` paths are never anonymized — anonymizing them would break file operations. Similarly, `http://localhost` and `127.x.x.x` addresses are exempt from the URL and IP regex stages.
 
 ### Pseudonymization
 
-`fake_for(label, original)` seeds Faker with `md5(original)[:8]` so the same real value always produces the same fake. This keeps the upstream prompt cache warm and makes the model's reasoning consistent across turns.
-
+`fake_for(label, original)` seeds Faker with `md5(original)[:8]` so the same real value always produces the same fake.
 
 | Label             | Fake looks like                      |
 | ----------------- | ------------------------------------ |
 | PERSON            | `Grace Daniels`                      |
-| EMAIL             | `johnsonkenneth@example.com`         |
-| PHONE             | `+1-800-555-0199`                    |
-| ADDRESS           | `USS Steele, FPO AE 36325`           |
+| EMAIL             | `espinozasamuel@example.net`         |
+| PHONE             | `+737-907-7967x1625`                 |
+| ADDRESS           | `USS Steele, FPO AE 51334`           |
 | EMPLOYER / ORG    | `Steele, Bond and Huff`              |
 | SECRET_AWS_KEY    | `AKIAxxx...` (AKIA prefix preserved) |
 | SECRET_GITHUB_PAT | `ghp_xxx...`                         |
 | SECRET_JWT        | same segment lengths, random base64  |
 | IP_ADDRESS        | valid random IPv4                    |
 
+---
+
+## Requirements
+
+- macOS (uses launchd for auto-start; the proxy itself runs on any OS)
+- Python 3.9+
+- ~685 MB RAM for the spaCy NER model
 
 ---
 
-## File map
-
-### Project source
-
-```
-pii-proxy/
-├── pii_proxy.py          slim routing shell — routes by path, calls provider, /health, /map
-├── providers/
-│   ├── base.py           abstract Provider class + shared utilities
-│   ├── anthropic.py      Anthropic-specific body parsing and streaming (/v1/messages)
-│   └── openai.py         OpenAI-specific body parsing and streaming (/v1/chat/completions)
-├── anonymizer.py         tiered detection pipeline, NER config, known_pii loader
-├── pseudonymizer.py      deterministic Faker generator (fake_for)
-├── secret_scan.py        credential regex patterns (SECRET_* labels)
-├── session_map.py        persistent original→fake map with file locking
-├── config.py             port, upstream URLs, paths, log level
-├── requirements.txt      pip dependencies
-├── known_pii.example.yaml  template for your PII list
-└── tests/
-    └── test_roundtrip.py   14 behavioral tests (run without a live proxy)
-```
-
-### Runtime files (outside project, protected from Claude)
-
-```
-~/.pii-proxy/
-├── known_pii.yaml        your real PII list (edit this to add names, emails, etc.)
-└── map.json              persisted real→fake map (auto-created, mode 0600)
-
-~/Library/LaunchAgents/
-└── com.jai.pii-proxy.plist   launchd service definition
-
-/tmp/
-├── pii-proxy.log         stdout (aiohttp access log)
-└── pii-proxy.err         stderr (redaction log — the one to watch)
-```
-
-### Claude Code settings
-
-```
-~/.claude/settings.json   deny rules that block Claude from reading ~/.pii-proxy/**
-```
-
----
-
-## Setup
+## Quick start
 
 ### 1. Install dependencies
 
@@ -125,38 +97,46 @@ pii-proxy/
 cd ~/path/to/pii-proxy
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
+./venv/bin/python -m spacy download en_core_web_sm
 ```
 
-> If spaCy is already installed via uv/brew and the model won't load, install the wheel directly into `venv/` with the command above — do not use `spacy download` with a uv-managed environment.
+> **Tip:** If spaCy is already installed system-wide (via uv or Homebrew) and the model won't load inside `venv`, download the wheel directly:
+> ```bash
+> ./venv/bin/pip install "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+> ```
 
 ### 2. Create your PII list
 
 ```bash
 cp known_pii.example.yaml ~/.pii-proxy/known_pii.yaml
 chmod 600 ~/.pii-proxy/known_pii.yaml
-# edit with your real names, emails, phones, addresses, family, employer
+# edit with your real names, emails, phones, addresses, employer, family
 ```
 
-### 3. Route your AI clients through the proxy
-
-Add to `~/.zshrc` (or `~/.bashrc`) for whichever providers you use:
+### 3. Install the launchd service
 
 ```bash
-# Claude Code / Anthropic SDK
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8082
-
-# OpenAI SDK
-export OPENAI_BASE_URL=http://127.0.0.1:8082
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
 ```
 
-Both can be set simultaneously — the proxy routes each request to the correct upstream based on the path.
+### 4. Route your AI clients through the proxy
 
-### 4. Install the launchd service (auto-start on login)
+Add to `~/.zshrc` (or `~/.bashrc`):
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.jai.pii-proxy.plist
+export ANTHROPIC_BASE_URL=http://localhost:8082
+export OPENAI_BASE_URL=http://localhost:8082
 ```
+
+Restart your terminal (and any AI clients) to pick up the change.
+
+### 5. Verify
+
+```bash
+curl -s http://localhost:8082/health | python3 -m json.tool
+```
+
+You should see `"status": "ok"` and a `map_entries` count. Send a message in Claude Code — the count will grow.
 
 ---
 
@@ -167,12 +147,10 @@ identity:
   names:
     - Your Full Name
     - Nickname
-    - Initials
   emails:
-    - you@personal.com
-    - you@work.com
+    - you@example.com
   phones:
-    - "+1-555-555-1234"
+    - "+1-555-000-0000"
   addresses:
     - 123 Main St, Springfield IL 62701
 
@@ -199,8 +177,11 @@ ignore:
   # - v2.1.3   # version string the IP regex catches incorrectly
 ```
 
-- List every alias you go by — the proxy only catches exact matches in Stage 1.
-- Single words (e.g. a first name alone) won't be caught by NER (requires ≥2 words), so list them explicitly here.
+**Tips:**
+
+- List every alias you go by — Stage 1 is exact-match only.
+- Single words (e.g. a first name alone) won't be caught by NER (requires ≥2 words), so add them explicitly here.
+- Use `ignore:` for values the pipeline flags incorrectly (port numbers, internal IPs, version strings).
 - Changes take effect on proxy restart.
 
 ---
@@ -208,10 +189,10 @@ ignore:
 ## Managing the proxy
 
 ```bash
-# Status
+# Status and map entry count
 curl -s http://localhost:8082/health
 
-# View the full real→fake map (JSON)
+# View the full real→fake map
 curl -s http://localhost:8082/map | python3 -m json.tool
 
 # Restart (picks up changes to pii_proxy.py or known_pii.yaml)
@@ -224,7 +205,6 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
 
 # Reset the pseudonym map (all fakes regenerate on next request)
-# Stop first, delete map, then start
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
 rm ~/.pii-proxy/map.json
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
@@ -240,59 +220,37 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
 tail -f /tmp/pii-proxy.err
 ```
 
-Each redaction line shows which section of the request body it came from. The labels are the same for both Anthropic and OpenAI requests:
+Labels in the log correspond to which part of the request body triggered the redaction:
 
 ```
-[system]      — system prompt (regex + known_pii only)
-[user]        — latest user message gets full NER; history user messages get map replay
-[assistant]   — prior assistant turns (regex + known_pii only)
+[system]      — system prompt
+[user]        — latest user message (full NER); history user messages (map replay)
+[assistant]   — prior assistant turns
 [tool]        — OpenAI tool role (map replay)
-[tool_result] — Anthropic tool_result blocks (regex + known_pii + map replay)
+[tool_result] — Anthropic tool_result blocks
 ```
 
-Example output:
+Example:
 
 ```
-2026-05-17 08:29:30 INFO   [system] redacted: 'you@email.com' → 'fake@example.net'
-2026-05-17 08:29:30 INFO   [user] redacted: 'Your Name' → 'Karen Jefferson'
-2026-05-17 08:29:30 INFO   [user] redacted: 'Your Name' → 'Karen Jefferson'
-2026-05-17 08:29:30 INFO   [assistant] redacted: 'you@email.com' → 'fake@example.net'
+2026-05-17 08:29:30 INFO   [system] redacted: 'you@company.com' → 'john85@example.org'
+2026-05-17 08:29:30 INFO   [user] redacted: 'Your Name' → 'Grace Daniels'
 ```
-
-The first `[user]` line is the latest message (NER ran). The second is a history message (map replay — no spaCy cost).
 
 ### Why are old messages being redacted on every request?
 
-Claude Code sends the **full conversation history** in every API call. The proxy scans all of it — not just your latest message. If your real name appeared 10 turns ago, it gets caught again on turn 11. This is correct behavior.
+Claude Code sends the **full conversation history** in every API call. The proxy scans all of it — not just your latest message. History messages use fast map replay rather than spaCy NER, so the cost stays flat regardless of conversation length.
 
-History messages use map replay (cheap string search) rather than spaCy NER, so the cost of scanning history stays flat regardless of conversation length.
-
-### Run tests (no live proxy needed)
+### Run tests
 
 ```bash
 cd ~/path/to/pii-proxy
 ./venv/bin/python tests/test_roundtrip.py
 ```
 
-### Check what's in the pseudonym map
-
-```bash
-curl -s http://localhost:8082/map | python3 -m json.tool
-# or read the file directly
-python3 -m json.tool ~/.pii-proxy/map.json
-```
-
-### Verify the proxy is intercepting traffic
-
-```bash
-# Should show map_entries growing after you use Claude Code
-watch -n2 'curl -s http://localhost:8082/health'
-```
-
 ### Test a specific string manually
 
 ```python
-# from the project directory
 ./venv/bin/python - <<'EOF'
 from anonymizer import anonymize_text, load_nlp, load_known_pii
 from session_map import SessionMap
@@ -301,10 +259,9 @@ nlp = load_nlp()
 smap = SessionMap(path=None)
 known_pii = load_known_pii("/Users/you/.pii-proxy/known_pii.yaml")
 
-text = "My name is Your Name, email is you@email.com"
+text = "My name is Your Name, email is you@company.com"
 anon, rep = anonymize_text(text, nlp, smap, known_pii)
 print("Anonymized:", anon)
-print("Map:", rep)
 print("Restored:", smap.deanonymize(anon))
 EOF
 ```
@@ -313,98 +270,39 @@ EOF
 
 ## PDF handling
 
-### Default behaviour (PDF_SCAN disabled)
+By default, PDF blocks pass through unmodified — Anthropic's servers decode them server-side.
 
-Claude Code sends PDFs to the API as base64-encoded `type: document` blocks. The proxy forwards these **unmodified** — the binary content passes straight through and Anthropic's servers decode it server-side. No PII scanning occurs on PDF content.
-
-### Enabling PDF scanning (opt-in)
-
-**Option A — shell session only** (temporary, lost on restart):
+To enable PDF text extraction and PII scanning, set `PII_PDF_SCAN=true` and install pymupdf:
 
 ```bash
+./venv/bin/pip install "pymupdf>=1.24"
 export PII_PDF_SCAN=true
 ```
 
-**Option B — launchd plist** (permanent, survives reboots):
-
-Edit `~/Library/LaunchAgents/com.jai.pii-proxy.plist` and add `PII_PDF_SCAN` to the `EnvironmentVariables` dict:
-
-```xml
-<key>EnvironmentVariables</key>
-<dict>
-  <key>PATH</key>
-  <string>/usr/local/bin:/usr/bin:/bin</string>
-  <key>PII_PDF_SCAN</key>
-  <string>true</string>
-</dict>
-```
-
-Then do a full plist reload to pick up the new env var (`kickstart -k` restarts the process but does not re-read the plist):
+For a permanent setting, add `PII_PDF_SCAN` to the `EnvironmentVariables` dict in your launchd plist, then reload:
 
 ```bash
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
 ```
 
-Verify the env var is live in the process before testing:
+When enabled, each `type: document` PDF block is extracted with pymupdf, the full detection pipeline runs on the text, and the block is replaced with pseudonymized plain text before forwarding.
 
-```bash
-launchctl print gui/$(id -u)/com.jai.pii-proxy | grep PII_PDF_SCAN
-```
+**Tradeoffs:**
 
-Also install the required dependency:
+|                               | PDF_SCAN off       | PDF_SCAN on                      |
+| ----------------------------- | ------------------ | -------------------------------- |
+| PII in PDFs redacted          | No                 | Yes                              |
+| Claude sees PDF formatting    | Yes                | No — plain text only             |
+| Claude sees images in the PDF | Yes                | No — images are discarded        |
+| Scanned PDFs (image-based)    | Readable by Claude | Blank — no text layer to extract |
+| Processing overhead           | None               | ~5–20ms per page                 |
 
-```bash
-./venv/bin/pip install "pymupdf>=1.24"
-```
-
-When enabled, the proxy intercepts every `type: document` PDF block, extracts the text using pymupdf, runs the full detection pipeline on it, and **replaces the document block with a plain-text block** containing the pseudonymized content. Claude never sees the original PDF bytes.
-
-### What PDF_SCAN catches
-
-The full pipeline runs on extracted PDF text — same as a user message:
-
-
-| PII type                               | Caught?                                     |
-| -------------------------------------- | ------------------------------------------- |
-| Email addresses                        | Yes — regex                                 |
-| Phone numbers                          | Yes — regex                                 |
-| SSN, credit cards                      | Yes — regex                                 |
-| API keys, tokens, secrets              | Yes — secret scan                           |
-| Names from `known_pii.yaml`            | Yes — exact match                           |
-| Previously seen names (NER-discovered) | Yes — map replay                            |
-| Unknown names/places not in map        | Yes — NER (applied as latest-message scope) |
-
-
-### Tradeoffs with PDF_SCAN enabled
-
-
-|                               | PDF_SCAN off       | PDF_SCAN on                                   |
-| ----------------------------- | ------------------ | --------------------------------------------- |
-| PII in PDFs redacted          | No                 | Yes                                           |
-| Claude sees PDF formatting    | Yes                | No — plain text only                          |
-| Claude sees images in the PDF | Yes                | No — images are discarded                     |
-| Tables / columns              | Preserved          | May be mangled (text extraction order varies) |
-| Scanned PDFs (image-based)    | Readable by Claude | Blank — no text layer to extract              |
-| Multi-column layouts          | Preserved          | May read in wrong order                       |
-| Processing overhead           | None               | pymupdf extraction (~5–20ms per page)         |
-
-
-### Gaps even with PDF_SCAN enabled
-
-- **Scanned / image-only PDFs** (e.g. a photographed document saved as PDF): no text layer exists, extraction returns empty, document is dropped. Use an OCR step outside the proxy if needed.
-- **Embedded images inside PDFs**: photos, diagrams, and image-based tables within an otherwise text PDF are silently discarded.
-- **Handwritten content**: not extractable via text layer.
-- **PII in PDF metadata** (author, title fields): not currently scanned.
-
-### Recommendation
-
-Enable PDF_SCAN for text-heavy documents where layout is not critical — contracts, reports, email threads saved as PDF, HR documents. Leave it disabled when Claude needs to reason about visual layout, forms, or embedded images.
+Best for: text-heavy documents where layout is not critical (contracts, reports, HR documents). Leave disabled when Claude needs to reason about visual layout, forms, or embedded images.
 
 ---
 
 ## Performance
-
 
 | Component             | Cost           | Scales with                             |
 | --------------------- | -------------- | --------------------------------------- |
@@ -415,35 +313,44 @@ Enable PDF_SCAN for text-heavy documents where layout is not critical — contra
 | Localhost loopback    | <1ms           | —                                       |
 | spaCy model in RAM    | ~685MB fixed   | —                                       |
 
-
-spaCy used to run on every user message in the full conversation history, making NER cost grow linearly with conversation length. Now NER runs only on the latest user message; history is covered by map replay (Python `str.__contains__` in C — negligible). A 100-turn session costs the same NER time as a 1-turn session.
-
-The dominant latency is always the upstream API's response time (1–30+ seconds). Proxy overhead is well under 100ms for typical sessions.
+The dominant latency is always the upstream API (1–30+ seconds). Proxy overhead is well under 100ms.
 
 ---
 
 ## Common issues
 
-
-| Symptom                                  | Cause                                    | Fix                                                                                       |
-| ---------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `curl health` returns connection refused | Proxy not running                        | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist`         |
-| spaCy model not found at startup         | Model installed to wrong venv            | Install the wheel directly into `venv/` — see Setup step 1                                |
-| Real name not redacted                   | Single-word name not in `known_pii.yaml` | NER requires ≥2 words; add the name explicitly to the YAML                                |
-| PII appears in Claude's response         | Tool input not deanonymized              | Streaming tool inputs (`input_json_delta`) are deanonymized; check logs for missing label |
-| Map grows without bound                  | Each unique real value gets one entry    | This is expected; entries are tiny (~100 bytes each)                                      |
-| Fakes changed after map delete           | Map deleted without proxy restart        | Stop proxy → delete map → start proxy; never delete while running                         |
-| `ANTHROPIC_BASE_URL` not picked up       | Env var set after Claude Code launched   | Restart Claude Code after setting the env var                                             |
-| `OPENAI_BASE_URL` not picked up          | Env var set after client launched        | Restart the OpenAI client after setting the env var                                       |
-| OpenAI requests not redacted             | Using wrong path                         | Confirm client sends to `/v1/chat/completions`; other paths pass through unmodified       |
-
+| Symptom                                  | Cause                                    | Fix                                                                                |
+| ---------------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------- |
+| `curl health` returns connection refused | Proxy not running                        | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist` |
+| spaCy model not found at startup         | Model installed to wrong environment     | Run `./venv/bin/python -m spacy download en_core_web_sm`                           |
+| Real name not redacted                   | Single-word name not in `known_pii.yaml` | NER requires ≥2 words; add the name explicitly to the YAML                         |
+| PII appears in Claude's response         | Tool input not deanonymized              | Streaming tool inputs are deanonymized; check logs for missing label               |
+| Map grows without bound                  | Each unique real value gets one entry    | Expected; entries are tiny (~100 bytes each)                                       |
+| Fakes changed after map delete           | Map deleted without proxy restart        | Stop proxy → delete map → start proxy; never delete while running                 |
+| `ANTHROPIC_BASE_URL` not picked up       | Env var set after Claude Code launched   | Restart Claude Code after setting the env var                                      |
+| OpenAI requests not redacted             | Using wrong path                         | Confirm client sends to `/v1/chat/completions`; other paths pass through unmodified|
 
 ---
 
 ## Security notes
 
-- `~/.pii-proxy/` is mode `0700`, `map.json` and `known_pii.yaml` are mode `0600`.
+- `~/.pii-proxy/` is mode `0700`; `map.json` and `known_pii.yaml` are mode `0600`.
 - The `/map` endpoint binds to `127.0.0.1` only — not reachable from the network.
 - Deny rules in `~/.claude/settings.json` block Claude from reading `~/.pii-proxy/**` directly.
 - Secrets (AWS keys, tokens, etc.) are pseudonymized, not erased. The proxy holds the real value in memory and in `map.json`; the upstream API only ever sees the fake. De-anonymization restores real values so model-generated tool calls (e.g. writing a `.env` file) contain correct credentials on your disk.
 
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Before submitting a change:
+
+1. Run the test suite: `./venv/bin/python tests/test_roundtrip.py`
+2. Keep new detection patterns in `secret_scan.py` or `anonymizer.py` as appropriate
+3. Add a test case in `tests/test_roundtrip.py` for any new PII type or edge case
+
+---
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).

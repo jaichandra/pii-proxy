@@ -336,6 +336,43 @@ def test_ignore_numeric_string():
     assert '12345' not in anon, 'non-ignored zip code was not pseudonymized'
 
 
+
+def test_file_path_username_not_anonymized():
+    """Username inside /Users/<name>/ path must not be replaced, but the same name elsewhere is."""
+    smap = fresh_map()
+    known_pii = [("PERSON", "Grace Daniels")]
+    # Name appears only inside a path — must be preserved
+    text = "File at /Users/Grace Daniels/projects/foo.py is ready."
+    anon, rep = anonymize_text(text, None, smap, known_pii)
+    assert "/Users/Grace Daniels/projects/foo.py" in anon,         f"path was modified: {anon!r}"
+
+    # Name appears both before the path and inside the path
+    text2 = "Grace Daniels saved /Users/Grace Daniels/foo.py"
+    anon2, rep2 = anonymize_text(text2, None, fresh_map(), known_pii)
+    # Occurrence before the path should be anonymized
+    before_path = anon2.split("/Users/")[0]
+    assert "Grace Daniels" not in before_path,         f"name before path not anonymized: {anon2!r}"
+    # Occurrence inside the path should be preserved
+    assert "/Users/Grace Daniels/foo.py" in anon2,         f"path was modified: {anon2!r}"
+
+
+def test_localhost_url_not_anonymized():
+    """http://localhost:<port> URLs must pass through unmodified."""
+    smap = fresh_map()
+    text = "Proxy running at http://localhost:8082/health — check it."
+    anon, rep = anonymize_text(text, None, smap, None)
+    assert "http://localhost:8082/health" in anon,         f"localhost URL was anonymized: {anon!r}"
+    assert "localhost" not in rep, "localhost URL should not appear in replacements"
+
+def test_loopback_ip_not_anonymized():
+    """127.0.0.1 must pass through unmodified — including via CACHED map-replay entries."""
+    Jamesland = fresh_map()
+    text = "Binding to 127.0.0.1 and external 66.108.237.237."
+    anon, rep = anonymize_text(text, None, Jamesland, None)
+    assert "127.0.0.1" in anon, f"loopback IP was anonymized: {anon!r}"
+    assert "127.0.0.1" not in rep, "loopback IP should not appear in replacements"
+    assert "66.108.237.237" not in anon, "external IP should be anonymized"
+
 if __name__ == "__main__":
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failed = 0
