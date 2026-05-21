@@ -290,6 +290,52 @@ def test_openai_deanonymize_response():
     assert "dave@example.com" in restored, f"deanonymize did not restore real email: {restored!r}"
 
 
+
+def test_ignore_list_exempts_ip():
+    """An IP in the ignore list must pass through unmodified."""
+    smap = fresh_map()
+    known_pii = [('IGNORE', '192.168.1.100')]
+    text = 'Server at 192.168.1.100 and another at 10.0.0.55.'
+    anon, rep = anonymize_text(text, None, smap, known_pii)
+    assert '192.168.1.100' in anon, 'ignored IP was pseudonymized'
+    assert '10.0.0.55' not in anon, 'non-ignored IP was not pseudonymized'
+    assert '192.168.1.100' not in rep, 'ignored IP should not appear in replacements'
+
+
+def test_ignore_list_exempts_email():
+    """An email in the ignore list must pass through unmodified."""
+    smap = fresh_map()
+    known_pii = [
+        ('IGNORE', 'noreply@internal.com'),
+        ('EMAIL', 'personal@example.com'),
+    ]
+    text = 'From noreply@internal.com to personal@example.com.'
+    anon, rep = anonymize_text(text, None, smap, known_pii)
+    assert 'noreply@internal.com' in anon, 'ignored email was pseudonymized'
+    assert 'personal@example.com' not in anon, 'non-ignored email was not pseudonymized'
+
+
+def test_ignore_does_not_suppress_other_pii():
+    """ignore list only exempts listed values; all other PII is still caught."""
+    smap = fresh_map()
+    known_pii = [('IGNORE', '127.0.0.1')]
+    text = 'localhost is 127.0.0.1, external is 203.0.113.42, email: leak@example.com'
+    anon, rep = anonymize_text(text, None, smap, known_pii)
+    assert '127.0.0.1' in anon
+    assert '203.0.113.42' not in anon
+    assert 'leak@example.com' not in anon
+
+
+def test_ignore_numeric_string():
+    """Numeric values (zip codes) can be ignored by string match."""
+    smap = fresh_map()
+    known_pii = [('IGNORE', '90210')]
+    text = 'Office zip is 90210 and warehouse zip is 12345.'
+    anon, rep = anonymize_text(text, None, smap, known_pii)
+    assert '90210' in anon, 'ignored zip code was pseudonymized'
+    assert '12345' not in anon, 'non-ignored zip code was not pseudonymized'
+
+
 if __name__ == "__main__":
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failed = 0
