@@ -341,6 +341,49 @@ The dominant latency is always the upstream API (1–30+ seconds). Proxy overhea
 
 ---
 
+
+## Disabling the proxy
+
+To run Claude Code without anonymization, you need to both unset the env var and relaunch Claude Code (it inherits env vars at startup, not dynamically).
+
+**Temporarily (current terminal session only):**
+
+```bash
+unset ANTHROPIC_BASE_URL
+unset OPENAI_BASE_URL
+# relaunch Claude Code from this terminal
+```
+
+The proxy can stay running — Claude Code just won't route through it.
+
+**Permanently (until you re-enable):**
+
+Comment out the lines in `~/.zshrc`:
+
+```bash
+# export ANTHROPIC_BASE_URL=http://localhost:8082
+# export OPENAI_BASE_URL=http://localhost:8082
+```
+
+Open a new terminal and relaunch Claude Code.
+
+**To also stop the proxy process:**
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
+```
+
+**To re-enable:**
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist
+# uncomment ANTHROPIC_BASE_URL/OPENAI_BASE_URL in ~/.zshrc, then restart terminal + Claude Code
+```
+
+The env var is the real switch — the proxy can be running but harmless as long as Claude Code doesn't point at it.
+
+---
+
 ## Contributing
 
 Issues and pull requests are welcome. Before submitting a change:
