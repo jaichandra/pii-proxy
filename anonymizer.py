@@ -30,7 +30,7 @@ PATTERNS = {
     # strict octet validation — rejects version strings like 2.1.133.453
     "IP_ADDRESS":  re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"),
     "ZIP_CODE":    re.compile(r"\b\d{5}(?:[‑\-]\d{4})?\b"),
-    "URL":         re.compile(r"https?://[^\s]+"),
+    # "URL":       re.compile(r"https?://[^\s]+"),  # disabled — low-risk; tokens in URLs are caught by secret_scan
 }
 
 # ── NER configuration ────────────────────────────────────────────────────────
