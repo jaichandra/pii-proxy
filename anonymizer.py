@@ -26,7 +26,7 @@ PATTERNS = {
     "EMAIL":       re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
     "PHONE":       re.compile(r"\b(?:\+?1[\s\-.]?)?(?:\(\d{3}\)|\d{3})[\s\-.]?\d{3}[\s\-.]?\d{4}\b"),
     "SSN":         re.compile(r"\b\d{3}[‑\-]\d{2}[‑\-]\d{4}\b"),
-    "CREDIT_CARD": re.compile(r"\b(?:\d{4}[\s\-]?){3}\d{4}\b"),
+    "CREDIT_CARD": re.compile(r"\b(?:\d{4}[\s\-]?){3,4}\d{1,4}\b"),
     # strict octet validation — rejects version strings like 2.1.133.453
     "IP_ADDRESS":  re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"),
     "ZIP_CODE":    re.compile(r"\b\d{5}(?:[‑\-]\d{4})?\b"),
@@ -218,13 +218,21 @@ def anonymize_text(
     # Exempt loopback addresses (URLs and bare IPs) regardless of label — includes CACHED map-replay entries
     candidates = [(l, v) for l, v in candidates if not _is_local_address(v)]
 
-    # Dedupe — first occurrence wins (so known_pii > regex > NER for the same string)
+    # Build set of explicit known_pii values — these override the reverse-map skip below
+    _known_pii_values = {v for lbl, v in (known_pii or []) if lbl != "IGNORE"}
+
+    # Dedupe — first occurrence wins (so known_pii > regex > NER for the same string).
+    # Also skip values already in smap.reverse (known fakes) to prevent cascading
+    # pseudonymization where generated fakes get re-anonymized on later turns.
     seen = set()
     unique: list[tuple[str, str]] = []
     for label, original in candidates:
-        if original not in seen:
-            seen.add(original)
-            unique.append((label, original))
+        if original in seen:
+            continue
+        if original not in _known_pii_values and original in smap.reverse:
+            continue
+        seen.add(original)
+        unique.append((label, original))
 
     # Apply longest-first so "John Smith" gets replaced before "John"
     unique.sort(key=lambda x: -len(x[1]))

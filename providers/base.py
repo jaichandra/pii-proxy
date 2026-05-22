@@ -41,7 +41,7 @@ class Provider(ABC):
         def _anon(text: str, ner: bool = True, section: str = "?", history: bool = False) -> str:
             if history and smap and smap.forward:
                 extra = [("CACHED", k) for k in smap.forward if k in text]
-                effective_pii = list(known_pii) + extra
+                effective_pii = list(known_pii or []) + extra
             else:
                 effective_pii = known_pii
             new_text, rep = anonymize_text(text, nlp if ner else None, smap, effective_pii)
