@@ -8,7 +8,7 @@ delegates to the deterministic Faker-based pseudonymizer.
 import logging
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import yaml
 
@@ -27,10 +27,32 @@ PATTERNS = {
     "PHONE":       re.compile(r"\b(?:\+?1[\s\-.]?)?(?:\(\d{3}\)|\d{3})[\s\-.]?\d{3}[\s\-.]?\d{4}\b"),
     "SSN":         re.compile(r"\b\d{3}[‑\-]\d{2}[‑\-]\d{4}\b"),
     "CREDIT_CARD": re.compile(r"\b(?:\d{4}[\s\-]?){3,4}\d{1,4}\b"),
-    # strict octet validation — rejects version strings like 2.1.133.453
-    "IP_ADDRESS":  re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"),
+    # RFC-1918 private ranges only — public IPs are low-risk and noisy
+    "IP_ADDRESS":  re.compile(
+        r'\b(?:'
+        r'10\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+        r'|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}'
+        r'|192\.168\.\d{1,3}\.\d{1,3}'
+        r')\b'
+    ),
     "ZIP_CODE":    re.compile(r"\b\d{5}(?:[‑\-]\d{4})?\b"),
     # "URL":       re.compile(r"https?://[^\s]+"),  # disabled — low-risk; tokens in URLs are caught by secret_scan
+}
+
+# ── Per-label structural validators ──────────────────────────────────────────
+
+def _luhn(s: str) -> bool:
+    digits = [int(c) for c in re.sub(r'\D', '', s)]
+    if not digits:
+        return False
+    total = sum(
+        (d * 2 - 9 if d * 2 > 9 else d * 2) if i % 2 else d
+        for i, d in enumerate(reversed(digits))
+    )
+    return total % 10 == 0
+
+_VALIDATORS: dict[str, Callable[[str], bool]] = {
+    "CREDIT_CARD": _luhn,
 }
 
 # ── NER configuration ────────────────────────────────────────────────────────
@@ -217,6 +239,10 @@ def anonymize_text(
 
     # Exempt loopback addresses (URLs and bare IPs) regardless of label — includes CACHED map-replay entries
     candidates = [(l, v) for l, v in candidates if not _is_local_address(v)]
+
+    # Drop candidates that fail structural validation (e.g. Luhn for credit cards)
+    candidates = [(l, v) for l, v in candidates
+                  if not (vfn := _VALIDATORS.get(l)) or vfn(v)]
 
     # Build set of explicit known_pii values — these override the reverse-map skip below
     _known_pii_values = {v for lbl, v in (known_pii or []) if lbl != "IGNORE"}
