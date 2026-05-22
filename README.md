@@ -1,7 +1,7 @@
 # pii-proxy
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org)
+[License](https://opensource.org/licenses/Apache-2.0)
+[Python](https://www.python.org)
 
 A local reverse proxy that intercepts every outgoing request to Anthropic and OpenAI, replaces personal information and credentials with realistic pseudonyms, then restores the real values in responses — so the AI provider never sees your actual PII.
 
@@ -67,6 +67,7 @@ First match wins — `known_pii > regex > NER` for the same string. Values liste
 
 `fake_for(label, original)` seeds Faker with `md5(original)[:8]` so the same real value always produces the same fake.
 
+
 | Label             | Fake looks like                      |
 | ----------------- | ------------------------------------ |
 | PERSON            | `Grace Daniels`                      |
@@ -78,6 +79,7 @@ First match wins — `known_pii > regex > NER` for the same string. Values liste
 | SECRET_GITHUB_PAT | `ghp_xxx...`                         |
 | SECRET_JWT        | same segment lengths, random base64  |
 | IP_ADDRESS        | valid random IPv4                    |
+
 
 ---
 
@@ -101,6 +103,7 @@ python3 -m venv venv
 ```
 
 > **Tip:** If spaCy is already installed system-wide (via uv or Homebrew) and the model won't load inside `venv`, download the wheel directly:
+>
 > ```bash
 > ./venv/bin/pip install "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 > ```
@@ -290,6 +293,7 @@ When enabled, each `type: document` PDF block is extracted with pymupdf, the ful
 
 **Tradeoffs:**
 
+
 |                               | PDF_SCAN off       | PDF_SCAN on                      |
 | ----------------------------- | ------------------ | -------------------------------- |
 | PII in PDFs redacted          | No                 | Yes                              |
@@ -298,11 +302,13 @@ When enabled, each `type: document` PDF block is extracted with pymupdf, the ful
 | Scanned PDFs (image-based)    | Readable by Claude | Blank — no text layer to extract |
 | Processing overhead           | None               | ~5–20ms per page                 |
 
+
 Best for: text-heavy documents where layout is not critical (contracts, reports, HR documents). Leave disabled when Claude needs to reason about visual layout, forms, or embedded images.
 
 ---
 
 ## Performance
+
 
 | Component             | Cost           | Scales with                             |
 | --------------------- | -------------- | --------------------------------------- |
@@ -313,22 +319,25 @@ Best for: text-heavy documents where layout is not critical (contracts, reports,
 | Localhost loopback    | <1ms           | —                                       |
 | spaCy model in RAM    | ~685MB fixed   | —                                       |
 
+
 The dominant latency is always the upstream API (1–30+ seconds). Proxy overhead is well under 100ms.
 
 ---
 
 ## Common issues
 
-| Symptom                                  | Cause                                    | Fix                                                                                |
-| ---------------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------- |
-| `curl health` returns connection refused | Proxy not running                        | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist` |
-| spaCy model not found at startup         | Model installed to wrong environment     | Run `./venv/bin/python -m spacy download en_core_web_sm`                           |
-| Real name not redacted                   | Single-word name not in `known_pii.yaml` | NER requires ≥2 words; add the name explicitly to the YAML                         |
-| PII appears in Claude's response         | Tool input not deanonymized              | Streaming tool inputs are deanonymized; check logs for missing label               |
-| Map grows without bound                  | Each unique real value gets one entry    | Expected; entries are tiny (~100 bytes each)                                       |
-| Fakes changed after map delete           | Map deleted without proxy restart        | Stop proxy → delete map → start proxy; never delete while running                 |
-| `ANTHROPIC_BASE_URL` not picked up       | Env var set after Claude Code launched   | Restart Claude Code after setting the env var                                      |
-| OpenAI requests not redacted             | Using wrong path                         | Confirm client sends to `/v1/chat/completions`; other paths pass through unmodified|
+
+| Symptom                                  | Cause                                    | Fix                                                                                 |
+| ---------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------- |
+| `curl health` returns connection refused | Proxy not running                        | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jai.pii-proxy.plist`   |
+| spaCy model not found at startup         | Model installed to wrong environment     | Run `./venv/bin/python -m spacy download en_core_web_sm`                            |
+| Real name not redacted                   | Single-word name not in `known_pii.yaml` | NER requires ≥2 words; add the name explicitly to the YAML                          |
+| PII appears in Claude's response         | Tool input not deanonymized              | Streaming tool inputs are deanonymized; check logs for missing label                |
+| Map grows without bound                  | Each unique real value gets one entry    | Expected; entries are tiny (~100 bytes each)                                        |
+| Fakes changed after map delete           | Map deleted without proxy restart        | Stop proxy → delete map → start proxy; never delete while running                   |
+| `ANTHROPIC_BASE_URL` not picked up       | Env var set after Claude Code launched   | Restart Claude Code after setting the env var                                       |
+| OpenAI requests not redacted             | Using wrong path                         | Confirm client sends to `/v1/chat/completions`; other paths pass through unmodified |
+
 
 ---
 
@@ -340,7 +349,6 @@ The dominant latency is always the upstream API (1–30+ seconds). Proxy overhea
 - Secrets (AWS keys, tokens, etc.) are pseudonymized, not erased. The proxy holds the real value in memory and in `map.json`; the upstream API only ever sees the fake. De-anonymization restores real values so model-generated tool calls (e.g. writing a `.env` file) contain correct credentials on your disk.
 
 ---
-
 
 ## Disabling the proxy
 
