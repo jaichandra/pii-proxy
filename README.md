@@ -7,6 +7,22 @@ A local reverse proxy that intercepts every outgoing request to Anthropic and Op
 
 ---
 
+## Install
+
+**One-click installer** — download the file for your platform from the [latest release](https://github.com/jaichandra/pii-proxy/releases/latest) and run it. No other files needed.
+
+| Platform | File |
+|----------|------|
+| macOS | `pii-proxy-installer-mac.command` — double-click in Finder |
+| Linux | `pii-proxy-installer-linux.sh` — `bash pii-proxy-installer-linux.sh` |
+| Windows | `pii-proxy-installer-windows.bat` — double-click |
+
+The installer sets up a Python virtual environment, downloads dependencies and the spaCy language model, and configures the proxy to start automatically on login. Python 3.9+ is installed automatically if not found.
+
+For a manual setup, see [Quick start](#quick-start) below.
+
+---
+
 ## Why pii-proxy
 
 - **Zero changes to your prompts.** Route your AI client through the proxy with one env var. Your workflow stays identical.
