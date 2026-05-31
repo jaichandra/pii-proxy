@@ -115,29 +115,139 @@ def step_create_venv(q: queue.Queue) -> None:
 def step_install_packages(q: queue.Queue) -> None:
     _put(q, "log", "Installing packages (this may take a minute)…")
     py = str(VENV_PY)
-    subprocess.run(
-        [py, "-m", "pip", "install", "-q", "--upgrade", "pip"],
-        check=True, capture_output=True,
+
+    def _run(cmd: list) -> None:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            tail = "\n".join(line for line in err.splitlines() if line.strip())[-800:]
+            raise RuntimeError(f"pip failed (exit {r.returncode}):\n\n{tail}")
+
+    _run([py, "-m", "pip", "install", "-q", "--upgrade", "pip"])
+    # --prefer-binary avoids source builds for packages that lack a wheel on this
+    # Python version (e.g. Python 3.14), which can silently drop dependencies.
+    _run([
+        py, "-m", "pip", "install", "--prefer-binary",
+        "-r", str(ROOT / "requirements.txt"),
+    ])
+
+    # pymupdf is optional (only needed for PII_PDF_SCAN=true). It has no wheel
+    # on newer Python versions and its source build requires system libraries,
+    # so install it separately and tolerate failure.
+    r = subprocess.run(
+        [py, "-m", "pip", "install", "-q", "--prefer-binary", "pymupdf>=1.24"],
+        capture_output=True, text=True,
     )
-    subprocess.run(
-        [py, "-m", "pip", "install", "-q", "-r", str(ROOT / "requirements.txt")],
-        check=True, capture_output=True,
-    )
+    if r.returncode == 0:
+        _put(q, "log", "  ✓ Optional PDF support (pymupdf) installed")
+    else:
+        _put(q, "log", "  (PDF scanning unavailable — pymupdf not supported on this Python)")
+
     _put(q, "log", "✓ Packages installed")
 
 
 def step_download_model(q: queue.Queue) -> None:
-    _put(q, "log", "Downloading language model (~200 MB, one-time)…")
+    _put(q, "log", "Downloading language model (one-time)…")
     py = str(VENV_PY)
-    for model in ("en_core_web_lg", "en_core_web_sm"):
+
+    # Verify spaCy is actually importable before trying to download a model.
+    # A silent pip failure (missing wheel for this Python version) shows up here.
+    ver_r = subprocess.run(
+        [py, "-c", "import spacy; print(spacy.__version__)"],
+        capture_output=True, text=True,
+    )
+    if ver_r.returncode != 0:
+        err = (ver_r.stderr or ver_r.stdout or "unknown error").strip()
+        raise RuntimeError(
+            f"spaCy is not installed correctly in the virtual environment.\n\n"
+            f"{err}\n\n"
+            f"Try running the installer again. If it keeps failing, install\n"
+            f"spaCy manually:\n"
+            f"  {py} -m pip install spacy"
+        )
+    spacy_ver = ver_r.stdout.strip()
+    _put(q, "log", f"  spaCy {spacy_ver} ready")
+
+    errors: list[str] = []
+
+    # 1. spacy's built-in download. sm (12 MB) first; lg (587 MB) second.
+    for model in ("en_core_web_sm", "en_core_web_lg"):
+        _put(q, "log", f"  Trying {model}…")
         r = subprocess.run(
             [py, "-m", "spacy", "download", model],
-            capture_output=True,
+            capture_output=True, text=True,
         )
         if r.returncode == 0:
             _put(q, "log", f"✓ Language model ready ({model})")
             return
-    raise RuntimeError("Could not download the spaCy language model.")
+        err = (r.stderr or r.stdout or "no output").strip()
+        errors.append(f"{model}: {err[-400:]}")
+
+    # 2. Fallback: query spaCy's compatibility JSON to find the correct model
+    #    release version. The model version does NOT equal the spaCy version
+    #    (e.g. spaCy 3.8.13 uses model en_core_web_sm-3.8.0), so guessing the
+    #    URL from spacy_ver is wrong — we must look it up.
+    import json
+    import urllib.request
+
+    _put(q, "log", "  Built-in download failed — checking compatibility API…")
+    try:
+        compat_url = (
+            "https://raw.githubusercontent.com/explosion/spacy-models"
+            "/master/compatibility.json"
+        )
+        with urllib.request.urlopen(compat_url, timeout=30) as resp:
+            compat = json.loads(resp.read())
+
+        all_entries = compat.get("spacy", {})
+        major_minor = ".".join(spacy_ver.split(".")[:2])   # e.g. "3.8"
+
+        # Try exact version, then major.minor key, then highest matching x.y.z.
+        models_compat = (
+            all_entries.get(spacy_ver)
+            or all_entries.get(major_minor)
+            or next(
+                (v for k, v in sorted(all_entries.items(), reverse=True)
+                 if k.startswith(major_minor + ".")),
+                None,
+            )
+        )
+
+        if not models_compat:
+            errors.append(
+                f"compatibility.json has no entry for spaCy {major_minor}.x"
+            )
+        else:
+            for model in ("en_core_web_sm", "en_core_web_lg"):
+                model_versions = models_compat.get(model, [])
+                if not model_versions:
+                    errors.append(f"{model}: not listed for spaCy {major_minor}.x")
+                    continue
+                model_ver = model_versions[0]
+                url = (
+                    "https://github.com/explosion/spacy-models/releases/download/"
+                    f"{model}-{model_ver}/{model}-{model_ver}-py3-none-any.whl"
+                )
+                _put(q, "log", f"  pip install {model} {model_ver}…")
+                r = subprocess.run(
+                    [py, "-m", "pip", "install", "--quiet", url],
+                    capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    _put(q, "log", f"✓ Language model ready ({model} {model_ver})")
+                    return
+                err = (r.stderr or r.stdout or "no output").strip()
+                errors.append(f"pip {model}: {err[-300:]}")
+
+    except Exception as exc:
+        errors.append(f"compatibility lookup failed: {exc}")
+
+    summary = "\n\n".join(errors[-3:])
+    raise RuntimeError(
+        f"Could not download the spaCy language model.\n\n{summary}\n\n"
+        f"Try running manually:\n"
+        f"  {py} -m spacy download en_core_web_sm"
+    )
 
 
 def step_write_pii_config(names: list, emails: list, phones: list) -> None:
@@ -331,10 +441,10 @@ def _btn(parent, text: str, cmd, primary: bool = True) -> tk.Button:
     return tk.Button(
         parent, text=text, command=cmd, font=F_BTN,
         relief="flat", cursor="hand2",
-        bg=ACCENT if primary else "#e5e7eb",
-        fg=WHITE if primary else FG_MAIN,
-        activebackground="#1d4ed8" if primary else "#d1d5db",
-        activeforeground=WHITE if primary else FG_MAIN,
+        bg="#dbeafe" if primary else "#e5e7eb",
+        fg="#1e3a8a" if primary else FG_MAIN,
+        activebackground="#bfdbfe" if primary else "#d1d5db",
+        activeforeground="#1e3a8a" if primary else FG_MAIN,
         padx=20, pady=8,
     )
 

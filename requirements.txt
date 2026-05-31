@@ -1,8 +1,6 @@
 aiohttp>=3.9
 spacy>=3.7
+click>=7.1        # explicit pin — spaCy's transitive dep that pip occasionally misses
+typer>=0.9        # explicit pin — spaCy CLI layer
 faker>=24
 pyyaml>=6
-# After installing: python -m spacy download en_core_web_lg
-
-# Optional — only needed when PII_PDF_SCAN=true
-pymupdf>=1.24

@@ -169,9 +169,9 @@ def _normalise(raw: dict) -> dict:
 def _btn(parent, text: str, cmd, primary: bool = True,
          danger: bool = False, **kw) -> tk.Button:
     if danger:
-        bg, abg, fg = DANGER,   "#b91c1c", WHITE
+        bg, abg, fg = "#fee2e2", "#fecaca", "#991b1b"
     elif primary:
-        bg, abg, fg = ACCENT,   "#1d4ed8", WHITE
+        bg, abg, fg = "#dbeafe", "#bfdbfe", "#1e3a8a"
     else:
         bg, abg, fg = "#e5e7eb","#d1d5db", FG_MAIN
     return tk.Button(
@@ -401,13 +401,69 @@ class LogWindow(tk.Toplevel):
 
 # ── Main manager window ───────────────────────────────────────────────────────
 
+REPO_URL = "https://github.com/jaichandra/pii-proxy"
+
+
+class AboutWindow(tk.Toplevel):
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent)
+        self.title("About PII Proxy")
+        self.geometry("360x280")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+        self.grab_set()
+        self._build()
+
+    def _build(self) -> None:
+        tk.Frame(self, bg=ACCENT, height=4).pack(fill="x")
+
+        inner = tk.Frame(self, bg=BG)
+        inner.pack(fill="both", expand=True, padx=PAD, pady=PAD)
+
+        tk.Label(inner, text="🛡  PII Proxy", font=F_TITLE,
+                 bg=BG, fg=ACCENT).pack(pady=(0, 4))
+
+        tk.Label(
+            inner,
+            text=(
+                "Automatically replaces personal information in\n"
+                "AI requests with believable pseudonyms, then\n"
+                "restores the originals in responses."
+            ),
+            font=F_BODY, bg=BG, fg=FG_BODY, justify="center",
+        ).pack(pady=(0, PAD))
+
+        ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=(0, PAD))
+
+        link = tk.Label(
+            inner, text=REPO_URL, font=F_SMALL,
+            bg=BG, fg=ACCENT, cursor="hand2",
+        )
+        link.pack()
+        link.bind("<Button-1>", lambda _e: self._open_repo())
+
+        tk.Label(inner, text="Click to open in browser",
+                 font=F_SMALL, bg=BG, fg=FG_MUTE).pack(pady=(2, PAD))
+
+        _btn(inner, "Close", self.destroy, primary=False).pack()
+
+    def _open_repo(self) -> None:
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.run(["open", REPO_URL])
+        elif system == "Windows":
+            subprocess.run(["start", "", REPO_URL], shell=True)
+        else:
+            subprocess.run(["xdg-open", REPO_URL])
+
+
 class ManagerApp:
     _REFRESH_MS = 2000
 
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("PII Proxy Manager")
-        self.root.geometry("380x440")
+        self.root.geometry("380x510")
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
         tk.Frame(self.root, bg=ACCENT, height=4).pack(fill="x")
@@ -451,6 +507,7 @@ class ManagerApp:
             ("Edit My PII Configuration", self._edit_pii, True),
             ("View Proxy Logs",           self._view_logs, False),
             ("Open Config Folder",        self._open_folder, False),
+            ("About PII Proxy",           self._about,       False),
         ]:
             _btn(main, text, cmd, primary=pri).pack(fill="x", pady=3)
 
@@ -516,6 +573,9 @@ class ManagerApp:
             subprocess.run(["explorer", str(PII_HOME)])
         else:
             subprocess.run(["xdg-open", str(PII_HOME)])
+
+    def _about(self) -> None:
+        AboutWindow(self.root)
 
     def run(self) -> None:
         self.root.mainloop()
