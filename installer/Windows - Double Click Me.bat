@@ -4,13 +4,17 @@
 
 cd /d "%~dp0"
 
-:: Search for Python 3.9+ via common launchers
+:: Search for Python 3.9+ via common launchers.
+:: Resolve real paths via 'where' and skip Windows Store app-execution-alias stubs
+:: (stubs live under WindowsApps and return exit 0 without running Python).
 set PYTHON=
 for %%p in (python3 python py) do (
-    %%p -c "import sys; exit(0 if sys.version_info>=(3,9) else 1)" >nul 2>&1
-    if not errorlevel 1 (
-        set PYTHON=%%p
-        goto :found
+    for /f "tokens=*" %%q in ('where %%p 2^>nul') do (
+        echo %%q | findstr /i "WindowsApps" >nul 2>&1
+        if errorlevel 1 (
+            "%%q" -c "import sys; exit(0 if sys.version_info>=(3,9) else 1)" >nul 2>&1
+            if not errorlevel 1 ( set PYTHON=%%q & goto :found )
+        )
     )
 )
 

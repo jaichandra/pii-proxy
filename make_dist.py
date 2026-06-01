@@ -415,10 +415,17 @@ del "%TMPZIP%" 2>nul
 echo Extraction complete.
 
 :: Find Python 3.9+
+:: Use 'where' to resolve real paths and skip Windows Store app-execution-alias stubs
+:: (stubs live under WindowsApps and return exit 0 without running Python).
 set "PYTHON="
 for %%p in (python3 python py) do (
-    %%p -c "import sys; exit(0 if sys.version_info>=(3,9) else 1)" >nul 2>&1
-    if not errorlevel 1 ( set "PYTHON=%%p" & goto :launch )
+    for /f "tokens=*" %%q in ('where %%p 2^>nul') do (
+        echo %%q | findstr /i "WindowsApps" >nul 2>&1
+        if errorlevel 1 (
+            "%%q" -c "import sys; exit(0 if sys.version_info>=(3,9) else 1)" >nul 2>&1
+            if not errorlevel 1 ( set "PYTHON=%%q" & goto :launch )
+        )
+    )
 )
 
 :: Not found - try winget (ships with Windows 10 1709+ and Windows 11)
